@@ -1,787 +1,542 @@
 """
-PCB Component Detection — Streamlit Web Application
-Light theme (forced) · Horizontal tabs · Schematic SVG icons
+PCB Component Detection — Streamlit Web Application (v2)
+Giao diện sáng · Menu bên trái · Màu riêng cho từng lớp · Biểu tượng sơ đồ SVG
+Chạy:  streamlit run app/app.py   (đặt .streamlit/config.toml ở thư mục gốc dự án)
 """
-
 from __future__ import annotations
 
 import base64
 import io
+import json
 import time
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from ultralytics import YOLO
 
-# ─────────────────────── paths ───────────────────────
+# ───────────────────────── đường dẫn ─────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MODEL_PATH   = PROJECT_ROOT / "model"   / "best.pt"
-ASSETS       = PROJECT_ROOT / "assest"
-GRAPH_DIR    = ASSETS / "graph"
-PRED_DIR     = ASSETS / "pred"
-METRICS_CSV  = ASSETS / "evaluation_metrics.csv"
+MODEL_PATH = PROJECT_ROOT / "model" / "best.pt"
+ASSET_ROOTS = [PROJECT_ROOT / n for n in ("assets", "assest") if (PROJECT_ROOT / n).is_dir()]
+ASSET_ROOTS = ASSET_ROOTS or [PROJECT_ROOT / "assets"]
+SEARCH_DIRS = [r / s if s else r for r in ASSET_ROOTS for s in ("", "graph", "pred", "results")]
+SAMPLE_DIRS = [r / "samples" for r in ASSET_ROOTS]
 
-# ─────────────────────── page config ─────────────────
-st.set_page_config(
-    page_title="PCB Component Detector",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
-# ══════════════════════════════════════════════════════
-#  CSS — Force light theme + custom styling
-# ══════════════════════════════════════════════════════
+def find_asset(name: str) -> Path | None:
+    for d in SEARCH_DIRS:
+        p = d / name
+        if p.is_file():
+            return p
+    return None
+
+
+def glob_assets(pattern: str) -> list[Path]:
+    found: dict[str, Path] = {}
+    for d in SEARCH_DIRS:
+        for p in sorted(d.glob(pattern)):
+            found.setdefault(p.name, p)
+    return [found[k] for k in sorted(found)]
+
+
+def sample_images() -> list[Path]:
+    out: list[Path] = []
+    for d in SAMPLE_DIRS:
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+            out += sorted(d.glob(ext))
+    return out
+
+
+st.set_page_config(page_title="PCB Component Detector", page_icon="🔬",
+                   layout="wide", initial_sidebar_state="expanded")
+
+# ───────────────────────── hằng số dự án ─────────────────────────
+CLASS_DESC = {
+    "resistor": "Điện trở", "capacitor": "Tụ điện", "connector": "Đầu nối",
+    "ic": "Vi mạch IC", "led": "Đèn LED", "diode": "Điốt",
+    "transistor": "Transistor", "inductor": "Cuộn cảm", "jumper": "Cầu nối",
+    "button": "Nút bấm",
+}
+CLASS_SUB = {
+    "resistor": "Kiểm soát dòng điện", "capacitor": "Lưu trữ năng lượng",
+    "connector": "Giao tiếp giữa các khối", "ic": "Xử lý và logic",
+    "led": "Tín hiệu quang học", "diode": "Chỉnh lưu dòng điện",
+    "transistor": "Khuếch đại / chuyển mạch", "inductor": "Lọc, lưu trữ từ trường",
+    "jumper": "Kết nối / ngắt mạch", "button": "Tương tác thủ công",
+}
+CLASS_COLORS = {
+    "resistor": "#e4572e", "capacitor": "#0969da", "connector": "#2da44e",
+    "ic": "#8250df", "led": "#d4a72c", "diode": "#bf3989", "transistor": "#0e8a9b",
+    "inductor": "#fb8500", "jumper": "#6e7781", "button": "#1f6f43",
+}
+TEST_OVERALL = {"Precision": 0.236, "Recall": 0.374, "mAP50": 0.281, "mAP50-95": 0.197}
+TEST_CLASS_COUNTS = {"capacitor": 202, "resistor": 199, "connector": 101, "ic": 76, "led": 51,
+                     "diode": 11, "button": 10, "jumper": 9, "transistor": 7, "inductor": 4}
+ACCENT = "#0969da"
+
+# ───────────────────────── CSS ─────────────────────────
 st.markdown(
     """
-    <style>
-    /* ── Force light mode at every level ── */
-    :root { color-scheme: light only !important; }
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"], .stMarkdown, button, input { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; }
+#MainMenu, footer { visibility: hidden; }
+.block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1240px; }
 
-    html, body {
-        background: #ffffff !important;
-        color: #1f2328 !important;
-    }
+/* sidebar */
+[data-testid="stSidebar"] { border-right: 1px solid #d0d7de; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label {
+    background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
+    padding: 9px 14px; margin-bottom: 6px; width: 100%; cursor: pointer;
+    transition: all .18s ease; font-weight: 600;
+}
+[data-testid="stSidebar"] div[data-testid="stRadio"] label:hover { border-color: #0969da; background: #f0f7ff; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label:has(input:checked) {
+    background: #0969da; border-color: #0969da; box-shadow: 0 2px 8px rgba(9,105,218,.28); }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label:has(input:checked) * { color: #fff !important; }
+[data-testid="stSidebar"] div[data-testid="stRadio"] label > div:first-child { display: none; }
 
-    /* Streamlit root containers */
-    [data-testid="stAppViewContainer"],
-    [data-testid="stAppViewContainer"] > section,
-    [data-testid="stMain"],
-    .main {
-        background: #ffffff !important;
-        color: #1f2328 !important;
-    }
+/* hero */
+.hero { position: relative; overflow: hidden; border-radius: 20px; padding: 56px 44px; margin-bottom: 26px;
+    text-align: center; color: #fff;
+    background: radial-gradient(circle at 15% 20%, rgba(255,255,255,.18), transparent 40%),
+                linear-gradient(135deg, #0550ae 0%, #0969da 55%, #388bfd 100%);
+    box-shadow: 0 10px 34px rgba(9,105,218,.28); }
+.hero h1 { font-size: 2.5rem; font-weight: 800; margin: 0 0 12px; color: #fff; }
+.hero p { font-size: 1.08rem; line-height: 1.8; margin: 0; color: rgba(255,255,255,.92); }
+.hero .tags { margin-top: 20px; }
+.hero .tag { display: inline-block; margin: 3px 4px; padding: 5px 14px; border-radius: 99px; font-size: .8rem;
+    font-weight: 600; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35); }
 
-    /* Sidebar — nền trắng sạch sẽ, viền phân cách rõ ràng */
-    [data-testid="stSidebar"] {
-        background-color: #f6f8fa !important;
-        border-right: 1px solid #d0d7de !important;
-    }
-    [data-testid="stSidebar"] * {
-        color: #1f2328 !important;
-    }
+/* pills, cards */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 26px; }
+.stat-pill { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 14px; padding: 18px 14px; text-align: center; }
+.stat-pill .val { font-size: 1.65rem; font-weight: 800; color: #0969da; line-height: 1.1; }
+.stat-pill .lbl { font-size: .78rem; color: #57606a; margin-top: 6px; }
+.card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 14px; padding: 22px; margin-bottom: 14px;
+    height: calc(100% - 14px); transition: border-color .18s, box-shadow .18s, transform .18s; }
+.card:hover { border-color: #0969da; box-shadow: 0 6px 18px rgba(9,105,218,.12); transform: translateY(-2px); }
+.card h3 { color: #0969da; margin: 0 0 8px; font-size: 1rem; font-weight: 700; }
+.card p, .card li { color: #57606a; margin: 0; font-size: .9rem; line-height: 1.6; }
+.comp-card { background: #fff; border: 1px solid #d0d7de; border-radius: 14px; padding: 20px 10px 16px;
+    margin-bottom: 12px; text-align: center; transition: all .18s; }
+.comp-card:hover { border-color: #0969da; box-shadow: 0 6px 18px rgba(9,105,218,.12); transform: translateY(-2px); }
+.comp-card .n { font-size: .92rem; font-weight: 700; color: #1f2328; margin: 10px 0 3px; }
+.comp-card .d { font-size: .76rem; color: #57606a; }
+.section-title { font-size: 1.3rem; font-weight: 700; color: #1f2328; border-left: 4px solid #0969da;
+    padding-left: 14px; margin: 30px 0 16px; }
+.note { background: #fff8c5; border: 1px solid #eac54f; border-radius: 12px; padding: 12px 16px; font-size: .86rem; color: #4d2d00; }
 
-    /* Radio button options trong sidebar */
-    [data-testid="stSidebar"] div[data-testid="stRadio"] label {
-        background-color: #ffffff !important;
-        border: 1px solid #d0d7de !important;
-        border-radius: 8px !important;
-        padding: 8px 12px !important;
-        margin-bottom: 6px !important;
-        font-weight: 600 !important;
-        cursor: pointer !important;
-        transition: all 0.2s ease !important;
-    }
-    [data-testid="stSidebar"] div[data-testid="stRadio"] label:hover {
-        background-color: #f0f7ff !important;
-        border-color: #0969da !important;
-        color: #0969da !important;
-    }
+/* chips, legend, bars */
+.chip { display: inline-flex; align-items: center; gap: 7px; background: #fff; border: 1px solid #d0d7de;
+    border-radius: 99px; padding: 5px 13px; font-size: .82rem; font-weight: 600; margin: 3px; color: #1f2328; }
+.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.bar-row { display: flex; align-items: center; gap: 12px; margin: 9px 0; font-size: .86rem; }
+.bar-bg { flex: 1; height: 10px; background: #eaeef2; border-radius: 99px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 99px; }
 
-    /* Header bar ở trên cùng */
-    header[data-testid="stHeader"] {
-        background: #ffffff !important;
-        border-bottom: 1px solid #d0d7de !important;
-        box-shadow: none !important;
-    }
-    [data-testid="stToolbar"] { background: #ffffff !important; }
+/* widgets */
+div[data-testid="stFileUploader"] section { border: 2px dashed #b6c2cf; border-radius: 14px; background: #f6f8fa; transition: all .2s; }
+div[data-testid="stFileUploader"] section:hover { border-color: #0969da; background: #f0f7ff; }
+[data-testid="stMetric"] { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 12px; padding: 14px 16px; }
+[data-testid="stMetricValue"] { color: #0969da; font-weight: 800; }
+[data-testid="stExpander"] { border: 1px solid #d0d7de; border-radius: 12px; }
+button[data-baseweb="tab"] { font-weight: 600; }
+[data-testid="stImage"] img { border-radius: 10px; }
 
-    #MainMenu { visibility: hidden !important; }
-    button[title="View fullscreen"] { display: none !important; }
-
-    /* Block container — padding */
-    .block-container {
-        padding-top: 1.5rem !important;
-        padding-bottom: 2rem !important;
-        max-width: 1200px;
-    }
-
-
-
-    /* ── Hero banner ── */
-    .hero {
-        background: linear-gradient(135deg, #0550ae 0%, #0969da 55%, #388bfd 100%);
-        border-radius: 16px;
-        padding: 52px 40px;
-        margin-bottom: 32px;
-        text-align: center;
-        box-shadow: 0 4px 24px rgba(9,105,218,0.22);
-    }
-    .hero h1 { font-size: 2.6rem; font-weight: 800; color: #fff; margin: 0 0 12px; }
-    .hero p  { font-size: 1.1rem; color: rgba(255,255,255,.9); margin: 0; line-height: 1.8; }
-
-    /* ── Stat pills ── */
-    .stat-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 28px; }
-    .stat-pill {
-        flex: 1; min-width: 120px;
-        background: #f6f8fa;
-        border: 1px solid #d0d7de;
-        border-radius: 12px;
-        padding: 18px 16px;
-        text-align: center;
-    }
-    .stat-pill .val { font-size: 1.8rem; font-weight: 700; color: #0969da; line-height: 1; }
-    .stat-pill .lbl { font-size: .8rem; color: #57606a; margin-top: 6px; }
-
-    /* ── Cards ── */
-    .card {
-        background: #f6f8fa;
-        border: 1px solid #d0d7de;
-        border-radius: 12px;
-        padding: 22px;
-        margin-bottom: 14px;
-        transition: border-color .18s, box-shadow .18s;
-    }
-    .card:hover { border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.10); }
-    .card h3 { color: #0969da; margin: 0 0 8px; font-size: 1rem; font-weight: 700; }
-    .card p  { color: #57606a; margin: 0; font-size: .9rem; line-height: 1.6; }
-
-    /* ── Component card (icon + name) ── */
-    .comp-card {
-        background: #ffffff;
-        border: 1px solid #d0d7de;
-        border-radius: 12px;
-        padding: 20px 12px 16px;
-        margin-bottom: 12px;
-        text-align: center;
-        transition: border-color .18s, box-shadow .18s;
-    }
-    .comp-card:hover { border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.10); }
-    .comp-card .comp-name { font-size: .92rem; font-weight: 700; color: #1f2328; margin: 10px 0 4px; }
-    .comp-card .comp-desc { font-size: .78rem; color: #57606a; }
-
-    /* ── Badge chips ── */
-    .chip {
-        display: inline-block;
-        background: #ddf4ff;
-        border: 1px solid #54aeff;
-        border-radius: 20px;
-        padding: 4px 12px;
-        font-size: .8rem;
-        color: #0550ae;
-        font-weight: 600;
-        margin: 3px;
-    }
-
-    /* ── Section title ── */
-    .section-title {
-        font-size: 1.3rem; font-weight: 700; color: #1f2328;
-        border-left: 4px solid #0969da;
-        padding-left: 14px; margin: 28px 0 18px;
-    }
-
-    /* ── Detection panel ── */
-    .det-panel {
-        background: #f6f8fa;
-        border: 1px solid #d0d7de;
-        border-radius: 12px;
-        padding: 20px;
-    }
-    .det-header {
-        font-size: .95rem; font-weight: 700; color: #0969da;
-        border-bottom: 1px solid #d0d7de;
-        padding-bottom: 10px; margin-bottom: 14px;
-    }
-    .conf-bar-wrap { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
-    .conf-bar-bg   { flex: 1; background: #d0d7de; border-radius: 99px; height: 7px; }
-    .conf-bar-fill { height: 7px; border-radius: 99px; }
-
-    /* ── Streamlit widgets in light mode ── */
-    div[data-testid="stFileUploader"] {
-        background: #f6f8fa !important;
-        border: 2px dashed #d0d7de !important;
-        border-radius: 12px !important;
-        transition: border-color .2s;
-    }
-    div[data-testid="stFileUploader"]:hover { border-color: #0969da !important; }
-
-    [data-testid="stExpander"] {
-        background: #f6f8fa !important;
-        border: 1px solid #d0d7de !important;
-        border-radius: 10px !important;
-    }
-
-    /* Metric cards */
-    [data-testid="stMetric"] {
-        background: #f6f8fa;
-        border: 1px solid #d0d7de;
-        border-radius: 10px;
-        padding: 14px 16px;
-    }
-    [data-testid="stMetricLabel"] > div { color: #57606a !important; font-size: .82rem; }
-    [data-testid="stMetricValue"] > div { color: #0969da !important; font-weight: 700; }
-
-    /* Dataframe */
-    div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #d0d7de; }
-
-    /* Info / warning / error boxes */
-    [data-testid="stAlert"] { border-radius: 10px !important; }
-
-    /* Divider */
-    hr { border-color: #d0d7de !important; }
-    </style>
-    """,
+@media (max-width: 768px) {
+    .hero { padding: 36px 20px; } .hero h1 { font-size: 1.8rem; }
+    .block-container { padding-left: 1rem; padding-right: 1rem; }
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
 
-# ══════════════════════════════════════════════════════
-#  SVG Schematic Icons — ký hiệu điện tử chuẩn
-# ══════════════════════════════════════════════════════
-_C = "#0969da"   # accent blue
+# ───────────────────────── biểu tượng SVG ─────────────────────────
+def _ln(x1, y1, x2, y2, w=2.5):
+    return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{ACCENT}" stroke-width="{w}" stroke-linecap="round"/>'
 
-COMPONENT_SVG: dict[str, str] = {
-    # Resistor — ký hiệu ANSI zigzag
-    "resistor": f"""
-        <svg viewBox="0 0 90 36" xmlns="http://www.w3.org/2000/svg" width="80" height="32">
-          <line x1="0" y1="18" x2="14" y2="18" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <polyline points="14,18 19,6 25,30 31,6 37,30 43,6 49,30 55,6 61,30 67,18 76,18"
-            fill="none" stroke="{_C}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-          <line x1="76" y1="18" x2="90" y2="18" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
 
-    # Capacitor — hai thanh song song
-    "capacitor": f"""
-        <svg viewBox="0 0 50 60" xmlns="http://www.w3.org/2000/svg" width="42" height="52">
-          <line x1="25" y1="2" x2="25" y2="24" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="5" y1="24" x2="45" y2="24" stroke="{_C}" stroke-width="4"   stroke-linecap="round"/>
-          <line x1="5" y1="36" x2="45" y2="36" stroke="{_C}" stroke-width="4"   stroke-linecap="round"/>
-          <line x1="25" y1="36" x2="25" y2="58" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
+def _svg(vb, w, h, body):
+    return f'<svg viewBox="{vb}" xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">{body}</svg>'
 
-    # Connector — ổ cắm 2 chân
-    "connector": f"""
-        <svg viewBox="0 0 60 54" xmlns="http://www.w3.org/2000/svg" width="56" height="50">
-          <rect x="4" y="6" width="28" height="42" rx="4"
-            fill="none" stroke="{_C}" stroke-width="2.5"/>
-          <circle cx="18" cy="20" r="5" fill="{_C}"/>
-          <circle cx="18" cy="36" r="5" fill="{_C}"/>
-          <line x1="32" y1="20" x2="56" y2="20" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="32" y1="36" x2="56" y2="36" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
 
-    # IC — hình chữ nhật với chân ra hai bên
-    "ic": f"""
-        <svg viewBox="0 0 60 56" xmlns="http://www.w3.org/2000/svg" width="56" height="52">
-          <rect x="14" y="8" width="32" height="40" rx="3"
-            fill="#ddf4ff" stroke="{_C}" stroke-width="2.5"/>
-          <line x1="14" y1="18" x2="4"  y2="18" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <line x1="14" y1="28" x2="4"  y2="28" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <line x1="14" y1="38" x2="4"  y2="38" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <line x1="46" y1="18" x2="56" y2="18" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <line x1="46" y1="28" x2="56" y2="28" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <line x1="46" y1="38" x2="56" y2="38" stroke="{_C}" stroke-width="2" stroke-linecap="round"/>
-          <text x="30" y="32" text-anchor="middle" font-size="9" font-weight="800"
-            font-family="monospace" fill="{_C}">IC</text>
-        </svg>""",
+def _stroke(extra=""):
+    return f'fill="none" stroke="{ACCENT}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" {extra}'
 
-    # LED — diode + tia sáng
-    "led": f"""
-        <svg viewBox="0 0 72 50" xmlns="http://www.w3.org/2000/svg" width="66" height="46">
-          <line x1="0"  y1="25" x2="14" y2="25" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <polygon points="14,10 14,40 40,25" fill="{_C}"/>
-          <line x1="40" y1="10" x2="40" y2="40" stroke="{_C}" stroke-width="3"   stroke-linecap="round"/>
-          <line x1="40" y1="25" x2="58" y2="25" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="46" y1="8"  x2="54" y2="2"  stroke="{_C}" stroke-width="2"   stroke-linecap="round"/>
-          <polyline points="54,2 54,6 50,6" fill="none" stroke="{_C}" stroke-width="1.6" stroke-linecap="round"/>
-          <line x1="52" y1="16" x2="60" y2="10" stroke="{_C}" stroke-width="2"   stroke-linecap="round"/>
-          <polyline points="60,10 60,14 56,14" fill="none" stroke="{_C}" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>""",
 
-    # Diode — tam giác + thanh chặn
-    "diode": f"""
-        <svg viewBox="0 0 70 42" xmlns="http://www.w3.org/2000/svg" width="64" height="38">
-          <line x1="0"  y1="21" x2="16" y2="21" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <polygon points="16,8 16,34 42,21" fill="{_C}"/>
-          <line x1="42" y1="8"  x2="42" y2="34" stroke="{_C}" stroke-width="3"   stroke-linecap="round"/>
-          <line x1="42" y1="21" x2="70" y2="21" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
-
-    # Transistor — NPN trong vòng tròn
-    "transistor": f"""
-        <svg viewBox="0 0 62 62" xmlns="http://www.w3.org/2000/svg" width="58" height="58">
-          <circle cx="36" cy="31" r="22" fill="none" stroke="{_C}" stroke-width="2.5"/>
-          <line x1="2"  y1="31" x2="24" y2="31" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="24" y1="16" x2="24" y2="46" stroke="{_C}" stroke-width="3"   stroke-linecap="round"/>
-          <line x1="24" y1="22" x2="52" y2="10" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="24" y1="40" x2="52" y2="52" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <polygon points="46,9 52,10 48,16" fill="{_C}"/>
-        </svg>""",
-
-    # Inductor — cuộn xoắn
-    "inductor": f"""
-        <svg viewBox="0 0 90 36" xmlns="http://www.w3.org/2000/svg" width="84" height="32">
-          <line x1="0"  y1="18" x2="10" y2="18" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <path d="M10,18 C14,18 14,6 19,6 C24,6 24,18 28,18
-                   C32,18 32,6 37,6 C42,6 42,18 46,18
-                   C50,18 50,6 55,6 C60,6 60,18 64,18
-                   C68,18 68,6 73,6 C78,6 78,18 82,18"
-            fill="none" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="82" y1="18" x2="90" y2="18" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
-
-    # Jumper — cầu nối (short circuit bridge)
-    "jumper": f"""
-        <svg viewBox="0 0 70 50" xmlns="http://www.w3.org/2000/svg" width="64" height="46">
-          <line x1="0"  y1="36" x2="14" y2="36" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <circle cx="18" cy="36" r="4" fill="none" stroke="{_C}" stroke-width="2.5"/>
-          <line x1="22" y1="36" x2="48" y2="36" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <circle cx="52" cy="36" r="4" fill="none" stroke="{_C}" stroke-width="2.5"/>
-          <line x1="56" y1="36" x2="70" y2="36" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <path d="M18,32 Q35,10 52,32" fill="none" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-        </svg>""",
-
-    # Button — nút nhấn thường hở (NO push button)
-    "button": f"""
-        <svg viewBox="0 0 70 52" xmlns="http://www.w3.org/2000/svg" width="64" height="48">
-          <line x1="0"  y1="38" x2="18" y2="38" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="18" y1="38" x2="18" y2="24" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="12" y1="24" x2="28" y2="24" stroke="{_C}" stroke-width="3"   stroke-linecap="round"/>
-          <line x1="52" y1="38" x2="70" y2="38" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="52" y1="38" x2="52" y2="24" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="42" y1="24" x2="58" y2="24" stroke="{_C}" stroke-width="3"   stroke-linecap="round"/>
-          <line x1="30" y1="38" x2="52" y2="38" stroke="{_C}" stroke-width="2.5" stroke-linecap="round"/>
-          <line x1="35" y1="15" x2="35" y2="6"  stroke="{_C}" stroke-width="2"   stroke-linecap="round"/>
-          <line x1="30" y1="6"  x2="40" y2="6"  stroke="{_C}" stroke-width="2"   stroke-linecap="round"/>
-        </svg>""",
-}
-
-CLASS_DESC: dict[str, str] = {
-    "resistor":   "Điện trở",
-    "capacitor":  "Tụ điện",
-    "connector":  "Đầu nối",
-    "ic":         "Vi mạch IC",
-    "led":        "Đèn LED",
-    "diode":      "Điốt",
-    "transistor": "Transistor",
-    "inductor":   "Cuộn cảm",
-    "jumper":     "Cầu nối",
-    "button":     "Nút bấm",
-}
-
-CLASS_SUBDESC: dict[str, str] = {
-    "resistor":   "Kiểm soát dòng điện",
-    "capacitor":  "Lưu trữ năng lượng",
-    "connector":  "Giao tiếp giữa các khối",
-    "ic":         "Xử lý & logic",
-    "led":        "Tín hiệu quang học",
-    "diode":      "Chỉnh lưu dòng điện",
-    "transistor": "Khuếch đại / chuyển mạch",
-    "inductor":   "Lọc và lưu trữ từ trường",
-    "jumper":     "Kết nối / ngắt mạch",
-    "button":     "Tương tác thủ công",
+COMPONENT_SVG = {
+    "resistor": _svg("0 0 90 36", 80, 32, _ln(0, 18, 14, 18) + _ln(76, 18, 90, 18)
+        + f'<polyline points="14,18 19,6 25,30 31,6 37,30 43,6 49,30 55,6 61,30 67,18 76,18" {_stroke()}/>'),
+    "capacitor": _svg("0 0 50 60", 42, 52, _ln(25, 2, 25, 24) + _ln(5, 24, 45, 24, 4) + _ln(5, 36, 45, 36, 4) + _ln(25, 36, 25, 58)),
+    "connector": _svg("0 0 60 54", 56, 50, f'<rect x="4" y="6" width="28" height="42" rx="4" {_stroke()}/>'
+        + f'<circle cx="18" cy="20" r="5" fill="{ACCENT}"/><circle cx="18" cy="36" r="5" fill="{ACCENT}"/>'
+        + _ln(32, 20, 56, 20) + _ln(32, 36, 56, 36)),
+    "ic": _svg("0 0 60 56", 56, 52, f'<rect x="14" y="8" width="32" height="40" rx="3" fill="#ddf4ff" stroke="{ACCENT}" stroke-width="2.5"/>'
+        + "".join(_ln(14, y, 4, y, 2) + _ln(46, y, 56, y, 2) for y in (18, 28, 38))
+        + f'<text x="30" y="32" text-anchor="middle" font-size="9" font-weight="800" font-family="monospace" fill="{ACCENT}">IC</text>'),
+    "led": _svg("0 0 72 50", 66, 46, _ln(0, 25, 14, 25) + f'<polygon points="14,10 14,40 40,25" fill="{ACCENT}"/>'
+        + _ln(40, 10, 40, 40, 3) + _ln(40, 25, 58, 25) + _ln(46, 8, 54, 2, 2) + _ln(52, 16, 60, 10, 2)
+        + f'<polyline points="54,2 54,6 50,6" {_stroke()}/><polyline points="60,10 60,14 56,14" {_stroke()}/>'),
+    "diode": _svg("0 0 70 42", 64, 38, _ln(0, 21, 16, 21) + f'<polygon points="16,8 16,34 42,21" fill="{ACCENT}"/>'
+        + _ln(42, 8, 42, 34, 3) + _ln(42, 21, 70, 21)),
+    "transistor": _svg("0 0 62 62", 58, 58, f'<circle cx="36" cy="31" r="22" {_stroke()}/>' + _ln(2, 31, 24, 31)
+        + _ln(24, 16, 24, 46, 3) + _ln(24, 22, 52, 10) + _ln(24, 40, 52, 52) + f'<polygon points="46,9 52,10 48,16" fill="{ACCENT}"/>'),
+    "inductor": _svg("0 0 90 36", 84, 32, _ln(0, 18, 10, 18) + _ln(82, 18, 90, 18)
+        + f'<path d="M10,18 C14,18 14,6 19,6 C24,6 24,18 28,18 C32,18 32,6 37,6 C42,6 42,18 46,18 C50,18 50,6 55,6 C60,6 60,18 64,18 C68,18 68,6 73,6 C78,6 78,18 82,18" {_stroke()}/>'),
+    "jumper": _svg("0 0 70 50", 64, 46, _ln(0, 36, 14, 36) + _ln(22, 36, 48, 36) + _ln(56, 36, 70, 36)
+        + f'<circle cx="18" cy="36" r="4" {_stroke()}/><circle cx="52" cy="36" r="4" {_stroke()}/>'
+        + f'<path d="M18,32 Q35,10 52,32" {_stroke()}/>'),
+    "button": _svg("0 0 70 52", 64, 48, _ln(0, 38, 18, 38) + _ln(18, 38, 18, 24) + _ln(12, 24, 28, 24, 3)
+        + _ln(52, 38, 70, 38) + _ln(52, 38, 52, 24) + _ln(42, 24, 58, 24, 3) + _ln(30, 38, 52, 38)
+        + _ln(35, 15, 35, 6, 2) + _ln(30, 6, 40, 6, 2)),
 }
 
 
-# ─────────────────────── helpers ─────────────────────
+def svg_img(svg: str, alt: str = "") -> str:
+    b64 = base64.b64encode(svg.strip().encode()).decode()
+    return f'<img src="data:image/svg+xml;base64,{b64}" alt="{alt}" style="max-height:48px;max-width:84px;object-fit:contain;"/>'
+
+
+# ───────────────────────── tiện ích ─────────────────────────
+def stretch(fn, *args, **kwargs):
+    """Tương thích Streamlit cũ (use_container_width) và mới (width='stretch')."""
+    try:
+        return fn(*args, width="stretch", **kwargs)
+    except Exception:
+        return fn(*args, use_container_width=True, **kwargs)
+
+
+def section(title: str) -> None:
+    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+
+
+def conf_color(c: float) -> str:
+    return "#1a7f37" if c >= 0.7 else "#9a6700" if c >= 0.45 else "#cf222e"
+
+
+def legend(classes) -> str:
+    return "".join(
+        f'<span class="chip"><span class="dot" style="background:{CLASS_COLORS[c]}"></span>{CLASS_DESC[c]}</span>'
+        for c in classes)
+
+
 @st.cache_resource(show_spinner=False)
 def load_model(path: str) -> YOLO:
     return YOLO(path)
 
 
-def confidence_color(conf: float) -> str:
-    if conf >= 0.7:
-        return "#1a7f37"   # green
-    elif conf >= 0.45:
-        return "#9a6700"   # amber
-    return "#cf222e"       # red
+@st.cache_data(show_spinner=False, max_entries=16)
+def load_image(data: bytes) -> Image.Image:
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    img.thumbnail((3200, 3200))
+    return img
 
 
-def svg_to_img_tag(svg_str: str, alt: str = "") -> str:
-    if not svg_str:
-        return ""
-    b64 = base64.b64encode(svg_str.strip().encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" alt="{alt}" style="max-height:48px; max-width:84px; object-fit:contain;" />'
+@st.cache_data(show_spinner=False, max_entries=32)
+def run_inference(data: bytes, conf: float, iou: float, imgsz: int):
+    model = load_model(str(MODEL_PATH))
+    res = model.predict(load_image(data), conf=conf, iou=iou, imgsz=imgsz, verbose=False)[0]
+    dets = []
+    for b in (res.boxes if res.boxes is not None else []):
+        x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+        dets.append({"cls": res.names[int(b.cls.item())], "conf": float(b.conf.item()), "box": (x1, y1, x2, y2)})
+    return dets, float(sum(res.speed.values()))
 
 
-# ══════════════════════════════════════════════════════
-#  SIDEBAR NAVIGATION (Vertical Menu)
-# ══════════════════════════════════════════════════════
+def _font(size: int):
+    for name in ("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def draw_detections(img: Image.Image, dets: list[dict], labels: bool, show_conf: bool) -> Image.Image:
+    out = img.copy()
+    d = ImageDraw.Draw(out)
+    scale = max(out.size) / 1000
+    lw, font = max(2, round(2 * scale)), _font(max(12, round(14 * scale)))
+    for det in sorted(dets, key=lambda x: x["conf"]):
+        x1, y1, x2, y2 = det["box"]
+        col = CLASS_COLORS.get(det["cls"], ACCENT)
+        d.rectangle([x1, y1, x2, y2], outline=col, width=lw)
+        if labels:
+            txt = det["cls"] + (f" {det['conf']:.0%}" if show_conf else "")
+            l, t, r, b = d.textbbox((0, 0), txt, font=font)
+            pad = 3
+            ty = y1 - (b - t) - 2 * pad
+            ty = y1 if ty < 0 else ty
+            d.rectangle([x1, ty, x1 + (r - l) + 2 * pad, ty + (b - t) + 2 * pad], fill=col)
+            d.text((x1 + pad - l, ty + pad - t), txt, fill="white", font=font)
+    return out
+
+
+# ───────────────────────── sidebar ─────────────────────────
+MENU = {"🏠  Trang chủ": "home", "🔍  Nhận diện": "detect",
+        "📊  Hiệu suất mô hình": "perf", "🖼️  Gallery mẫu": "gallery"}
 with st.sidebar:
     st.markdown(
-        """
-        <div style="text-align: center; padding: 12px 0 20px 0;">
-            <div style="font-size: 2.8rem; line-height: 1;">🔬</div>
-            <h2 style="font-size: 1.25rem; font-weight: 700; color: #0969da; margin: 8px 0 2px 0;">PCB Detector</h2>
-            <p style="font-size: 0.8rem; color: #57606a; margin: 0;">YOLO26 Component Analysis</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("**Menu điều hướng**")
-    MENU_OPTIONS = [
-        "🏠  Trang chủ",
-        "🔍  Nhận diện",
-        "📊  Hiệu suất mô hình",
-        "🖼️  Gallery mẫu",
-    ]
-
-    selected_menu = st.radio(
-        "Chọn chức năng",
-        options=MENU_OPTIONS,
-        index=0,
-        label_visibility="collapsed",
-    )
-
+        """<div style="text-align:center;padding:10px 0 18px;">
+        <div style="font-size:2.6rem;line-height:1;">🔬</div>
+        <h2 style="font-size:1.25rem;font-weight:800;color:#0969da;margin:8px 0 2px;">PCB Detector</h2>
+        <p style="font-size:.8rem;color:#57606a;margin:0;">YOLO26n Component Analysis</p></div>""",
+        unsafe_allow_html=True)
+    choice = st.radio("Điều hướng", list(MENU), label_visibility="collapsed")
     st.markdown("---")
     st.markdown(
-        """
-        <div style="font-size: 0.78rem; color: #57606a; line-height: 1.6;">
-            <b>Thông tin hệ thống:</b><br>
-            • Mô hình: YOLO26n (COCO Transfer)<br>
-            • Số lớp nhận diện: 10 linh kiện<br>
-            • Dữ liệu: 460 bo mạch in
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """<div style="font-size:.78rem;color:#57606a;line-height:1.7;"><b>Thông tin hệ thống</b><br>
+        • Mô hình: YOLO26n (transfer từ COCO)<br>• 10 lớp linh kiện<br>• 460 ảnh: 368 / 46 / 46<br>
+        • mAP50 (test): 28,1%</div>""", unsafe_allow_html=True)
+page = MENU[choice]
 
-PAGE_KEY_MAP = {
-    "🏠  Trang chủ": "home",
-    "🔍  Nhận diện": "detect",
-    "📊  Hiệu suất mô hình": "perf",
-    "🖼️  Gallery mẫu": "gallery",
-}
-active_page = PAGE_KEY_MAP[selected_menu]
 
-# ══════════════════════════════════════════════════════
-#  PAGE ROUTING
-# ══════════════════════════════════════════════════════
-
-if active_page == "home":
+# ───────────────────────── TRANG CHỦ ─────────────────────────
+def page_home() -> None:
     st.markdown(
-        """
-        <div class="hero">
-            <h1>🔬 PCB Component Detector</h1>
-            <p>
-                Hệ thống nhận diện linh kiện điện tử trên bo mạch in (PCB)<br>
-                sử dụng mô hình <b>YOLO26</b> huấn luyện trên <b>460 ảnh</b> thực tế.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Stat pills
-    st.markdown(
-        """
+        """<div class="hero"><h1>🔬 PCB Component Detector</h1>
+        <p>Nhận diện linh kiện điện tử trên bo mạch in (PCB)<br>
+        bằng <b>YOLO26n</b>, huấn luyện trên <b>460 ảnh</b> với <b>10 loại linh kiện</b>.</p>
+        <div class="tags"><span class="tag">Phát hiện đối tượng</span><span class="tag">Transfer learning</span>
+        <span class="tag">Suy luận thời gian thực</span></div></div>
         <div class="stat-row">
-            <div class="stat-pill"><div class="val">460</div><div class="lbl">Ảnh huấn luyện</div></div>
-            <div class="stat-pill"><div class="val">10</div><div class="lbl">Loại linh kiện</div></div>
-            <div class="stat-pill"><div class="val">100</div><div class="lbl">Epochs</div></div>
-            <div class="stat-pill"><div class="val">640px</div><div class="lbl">Kích thước input</div></div>
-            <div class="stat-pill"><div class="val">YOLO26n</div><div class="lbl">Kiến trúc</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <div class="stat-pill"><div class="val">460</div><div class="lbl">Ảnh dữ liệu</div></div>
+        <div class="stat-pill"><div class="val">10</div><div class="lbl">Loại linh kiện</div></div>
+        <div class="stat-pill"><div class="val">28,1%</div><div class="lbl">mAP50 (tập test)</div></div>
+        <div class="stat-pill"><div class="val">5–10 ms</div><div class="lbl">Suy luận / ảnh (GPU T4)</div></div>
+        <div class="stat-pill"><div class="val">640 px</div><div class="lbl">Kích thước huấn luyện</div></div></div>""",
+        unsafe_allow_html=True)
 
-    # How to use
-    st.markdown('<div class="section-title">Cách sử dụng</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    steps_home = [
-        ("① Chọn tab Nhận diện", 'Nhấn tab <b>Nhận diện</b> trên thanh điều hướng phía trên.'),
-        ("② Tải ảnh PCB lên",    'Kéo thả hoặc chọn ảnh <b>JPG / PNG / BMP / WEBP</b>.'),
-        ("③ Xem kết quả",        'Mô hình đánh dấu linh kiện với <b>tên + độ tin cậy</b>.'),
-    ]
-    for col, (title, body) in zip([c1, c2, c3], steps_home):
-        with col:
-            st.markdown(
-                f'<div class="card"><h3>{title}</h3><p>{body}</p></div>',
-                unsafe_allow_html=True,
-            )
+    section("Cách sử dụng")
+    steps = [("① Mở mục Nhận diện", "Chọn <b>Nhận diện</b> trong menu bên trái."),
+             ("② Tải ảnh PCB lên", "Kéo thả hoặc chọn ảnh <b>JPG / PNG / BMP / WEBP</b>."),
+             ("③ Xem kết quả", "Mỗi linh kiện có <b>khung màu theo lớp, tên và độ tin cậy</b>.")]
+    for col, (t, b) in zip(st.columns(3), steps):
+        col.markdown(f'<div class="card"><h3>{t}</h3><p>{b}</p></div>', unsafe_allow_html=True)
 
-    # Component catalog — SVG schematic icons
-    st.markdown('<div class="section-title">10 loại linh kiện được nhận diện</div>', unsafe_allow_html=True)
-    cols5 = st.columns(5)
-    for i, cls in enumerate(CLASS_DESC):
-        with cols5[i % 5]:
-            svg_raw = COMPONENT_SVG.get(cls, "")
-            img_tag = svg_to_img_tag(svg_raw, alt=cls)
-            name = CLASS_DESC[cls]
-            sub  = CLASS_SUBDESC[cls]
-            st.markdown(
-                f"""<div class="comp-card">
-                    <div style="display:flex;justify-content:center;align-items:center;height:52px;">
-                        {img_tag}
-                    </div>
-                    <div class="comp-name">{name}</div>
-                    <div class="comp-desc">{sub}</div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+    section("10 loại linh kiện được nhận diện")
+    cols = st.columns(5)
+    for i, c in enumerate(CLASS_DESC):
+        cols[i % 5].markdown(
+            f"""<div class="comp-card" style="border-top:3px solid {CLASS_COLORS[c]};">
+            <div style="display:flex;justify-content:center;align-items:center;height:52px;">{svg_img(COMPONENT_SVG[c], c)}</div>
+            <div class="n">{CLASS_DESC[c]}</div><div class="d">{CLASS_SUB[c]}</div></div>""",
+            unsafe_allow_html=True)
 
-    # Pipeline
-    st.markdown('<div class="section-title">Pipeline xử lý</div>', unsafe_allow_html=True)
-    pipe_cols = st.columns(4)
-    pipe_steps = [
-        ("📥", "Thu thập dữ liệu",   "460 ảnh PCB thực tế, gán nhãn bằng LabelImg"),
-        ("🧹", "Tiền xử lý",         "Chuẩn hóa bbox, sửa 92 box lỗi, chia 80/10/10%"),
-        ("🧠", "Huấn luyện YOLO26",  "Transfer learning từ COCO, Mosaic + Mixup augmentation"),
-        ("🔬", "Triển khai",          "Streamlit web app, chạy local, inference real-time"),
-    ]
-    for col, (icon, title, desc) in zip(pipe_cols, pipe_steps):
-        with col:
-            st.markdown(
-                f"""<div class="card" style="text-align:center;">
-                    <div style="font-size:2rem;">{icon}</div>
-                    <h3 style="font-size:.93rem;margin-top:8px;">{title}</h3>
-                    <p style="font-size:.82rem;">{desc}</p>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+    section("Pipeline xử lý")
+    pipe = [("📥", "Thu thập dữ liệu", "460 ảnh PCB, nhãn định dạng YOLO"),
+            ("🧹", "Chuẩn hoá", "Clip bbox, sửa 92 box lỗi, chia 80/10/10"),
+            ("🧠", "Huấn luyện", "YOLO26n, transfer từ COCO, mosaic + mixup"),
+            ("🚀", "Triển khai", "Ứng dụng Streamlit chạy local")]
+    for col, (ic, t, d) in zip(st.columns(4), pipe):
+        col.markdown(f'<div class="card" style="text-align:center;"><div style="font-size:2rem;">{ic}</div>'
+                     f'<h3 style="margin-top:8px;">{t}</h3><p>{d}</p></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="note"><b>Lưu ý:</b> đây là bản mẫu. Mô hình mạnh ở connector, IC, LED, nút bấm; '
+                'còn yếu ở điện trở / tụ điện (dễ nhầm nhau) và các lớp hiếm (diode, transistor, inductor, jumper). '
+                'Hãy kiểm tra lại kết quả trước khi dùng thực tế.</div>', unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════
-#  PAGE: DETECT
-# ══════════════════════════════════════════════════════
-elif active_page == "detect":
-    st.markdown('<div class="section-title">Nhận diện linh kiện PCB</div>', unsafe_allow_html=True)
-
+# ───────────────────────── NHẬN DIỆN ─────────────────────────
+def page_detect() -> None:
+    section("Nhận diện linh kiện PCB")
     if not MODEL_PATH.is_file():
-        st.error(
-            f"Không tìm thấy model tại `{MODEL_PATH}`.\n\n"
-            "Hãy đặt file `best.pt` vào thư mục `model/`."
-        )
+        st.error(f"Không tìm thấy model tại `{MODEL_PATH}`.\n\nĐặt file `best.pt` vào thư mục `model/`.")
         st.stop()
 
-    # Settings — inline expander
-    with st.expander("⚙️  Cài đặt nhận diện", expanded=False):
-        sc1, sc2, sc3, sc4 = st.columns([2, 2, 1, 1])
-        with sc1:
-            confidence = st.slider("Ngưỡng tin cậy (Conf)",
-                0.05, 0.95, 0.25, 0.05,
-                help="Chỉ hiển thị box có độ tin cậy ≥ ngưỡng.")
-        with sc2:
-            iou = st.slider("Ngưỡng IoU (NMS)",
-                0.10, 0.90, 0.45, 0.05,
-                help="Non-maximum suppression — giảm box trùng lặp.")
-        with sc3:
-            show_original = st.toggle("Hiển thị ảnh gốc", value=True)
-        with sc4:
-            show_table = st.toggle("Bảng chi tiết", value=True)
+    with st.expander("⚙️  Cài đặt nhận diện", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        conf = c1.slider("Ngưỡng tin cậy (Conf)", 0.05, 0.95, 0.20, 0.05,
+                         help="Chỉ giữ box có độ tin cậy ≥ ngưỡng. Mô hình thường cho điểm thấp (0,25–0,5), nên đừng đặt quá cao.")
+        iou = c2.slider("Ngưỡng IoU (NMS)", 0.10, 0.90, 0.45, 0.05, help="Giảm box trùng lặp.")
+        imgsz = c3.select_slider("Kích thước suy luận", options=[640, 960, 1280], value=640,
+                                 help="Lớn hơn giúp bắt linh kiện nhỏ nhưng chậm hơn.")
+        classes = st.multiselect("Lớp hiển thị", list(CLASS_DESC), default=list(CLASS_DESC),
+                                 format_func=lambda c: CLASS_DESC[c])
+        t1, t2, t3 = st.columns(3)
+        show_original = t1.toggle("Hiển thị ảnh gốc", True)
+        show_labels = t2.toggle("Hiện nhãn trên ảnh", True)
+        show_conf = t3.toggle("Hiện % tin cậy", True)
 
-    uploaded_file = st.file_uploader(
-        "Kéo thả hoặc chọn ảnh PCB (JPG · JPEG · PNG · BMP · WEBP)",
-        type=["jpg", "jpeg", "png", "bmp", "webp"],
-    )
+    up = st.file_uploader("Kéo thả hoặc chọn ảnh PCB (JPG · PNG · BMP · WEBP)",
+                          type=["jpg", "jpeg", "png", "bmp", "webp"])
+    data: bytes | None = up.getvalue() if up else None
+    samples = sample_images()
+    if data is None and samples:
+        pick = st.selectbox("Hoặc thử một ảnh mẫu", ["— Không dùng —"] + [p.name for p in samples])
+        if pick != "— Không dùng —":
+            data = next(p for p in samples if p.name == pick).read_bytes()
 
-    if uploaded_file is None:
-        st.markdown(
-            """<div style='text-align:center; padding:60px 0; color:#57606a;'>
-                <div style='font-size:3rem;'>📤</div>
-                <div style='font-size:1.1rem; margin-top:14px; font-weight:600;'>
-                    Tải ảnh PCB lên để bắt đầu nhận diện
-                </div>
-                <div style='font-size:.85rem; margin-top:6px;'>
-                    Hỗ trợ: JPG, JPEG, PNG, BMP, WEBP
-                </div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-    else:
-        image = Image.open(uploaded_file).convert("RGB")
-        model = load_model(str(MODEL_PATH))
+    if data is None:
+        st.markdown("""<div style="text-align:center;padding:56px 0;color:#57606a;"><div style="font-size:3rem;">📤</div>
+            <div style="font-size:1.1rem;margin-top:12px;font-weight:600;">Tải ảnh PCB lên để bắt đầu nhận diện</div>
+            <div style="font-size:.85rem;margin-top:6px;">Ảnh chụp thẳng, đủ sáng và rõ nét cho kết quả tốt hơn</div></div>""",
+                    unsafe_allow_html=True)
+        return
 
-        with st.spinner("Đang phân tích ảnh với YOLO26…"):
-            t0     = time.perf_counter()
-            result = model.predict(image, conf=confidence, iou=iou, verbose=False)[0]
-            elapsed_ms = (time.perf_counter() - t0) * 1000
+    image = load_image(data)
+    with st.spinner("Đang phân tích ảnh với YOLO26n…"):
+        all_dets, ms = run_inference(data, conf, iou, imgsz)
+    dets = [d for d in all_dets if d["cls"] in classes]
+    counter = Counter(d["cls"] for d in dets)
+    annotated = draw_detections(image, dets, show_labels, show_conf)
 
-        annotated = Image.fromarray(result.plot()[..., ::-1])
+    m = st.columns(4)
+    m[0].metric("Linh kiện phát hiện", len(dets))
+    m[1].metric("Số loại", len(counter))
+    m[2].metric("Thời gian suy luận", f"{ms:.0f} ms")
+    m[3].metric("Độ tin cậy trung bình", f"{(sum(d['conf'] for d in dets) / len(dets)):.0%}" if dets else "—")
 
-        detections: list[dict] = []
-        if result.boxes is not None:
-            for box in result.boxes:
-                cid  = int(box.cls.item())
-                conf = float(box.conf.item())
-                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-                w, h = x2 - x1, y2 - y1
-                detections.append({
-                    "Linh kiện":           result.names[cid],
-                    "Tin cậy":             round(conf, 3),
-                    "Chiều rộng":          round(w),
-                    "Chiều cao":           round(h),
-                    "Tọa độ (x1,y1,x2,y2)": f"({x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f})",
-                })
+    if not dets:
+        st.warning("Không có linh kiện nào với thiết lập hiện tại. Thử **giảm ngưỡng tin cậy**, tăng kích thước suy luận hoặc chọn thêm lớp.")
+        return
 
-        counter = Counter(d["Linh kiện"] for d in detections)
+    tab_img, tab_list, tab_stat = st.tabs(["🖼️  Hình ảnh", "📋  Danh sách", "📈  Thống kê"])
 
-        # Quick metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Linh kiện phát hiện", len(detections))
-        m2.metric("Loại khác nhau",      len(counter))
-        m3.metric("Thời gian suy luận",  f"{elapsed_ms:.0f} ms")
-        m4.metric("Ngưỡng tin cậy",      f"{confidence:.0%}")
-
-        st.divider()
-
-        # Images
+    with tab_img:
+        st.markdown(legend(c for c in CLASS_DESC if c in counter), unsafe_allow_html=True)
         if show_original:
-            left, right = st.columns(2)
-            with left:
-                st.markdown("**Ảnh gốc**")
-                st.image(image, use_container_width=True)
-            with right:
-                st.markdown("**Kết quả nhận diện**")
-                st.image(annotated, use_container_width=True)
+            a, b = st.columns(2)
+            a.markdown("**Ảnh gốc**")
+            stretch(a.image, image)
+            b.markdown("**Kết quả nhận diện**")
+            stretch(b.image, annotated)
         else:
-            st.markdown("**Kết quả nhận diện**")
-            st.image(annotated, use_container_width=True)
+            stretch(st.image, annotated)
 
-        if detections:
-            st.divider()
-            st.markdown("**Tổng hợp linh kiện phát hiện**")
-            chips = "".join(
-                f'<span class="chip">{CLASS_DESC.get(cls, cls)} × {cnt}</span>'
-                for cls, cnt in sorted(counter.items(), key=lambda x: -x[1])
-            )
-            st.markdown(chips, unsafe_allow_html=True)
+    rows = [{"Linh kiện": CLASS_DESC[d["cls"]], "Lớp": d["cls"], "Tin cậy (%)": round(d["conf"] * 100, 1),
+             "Rộng (px)": round(d["box"][2] - d["box"][0]), "Cao (px)": round(d["box"][3] - d["box"][1]),
+             "x1": round(d["box"][0]), "y1": round(d["box"][1]), "x2": round(d["box"][2]), "y2": round(d["box"][3])}
+            for d in sorted(dets, key=lambda x: -x["conf"])]
+    df = pd.DataFrame(rows)
 
-            if show_table:
-                st.divider()
-                st.markdown("**Chi tiết từng phát hiện**")
-                bars = '<div class="det-panel"><div class="det-header">Độ tin cậy · Tên linh kiện · Kích thước bounding box</div>'
-                for d in sorted(detections, key=lambda x: -x["Tin cậy"]):
-                    cv    = d["Tin cậy"]
-                    color = confidence_color(cv)
-                    pct   = int(cv * 100)
-                    vn    = CLASS_DESC.get(d["Linh kiện"], d["Linh kiện"])
-                    bars += (
-                        f'<div class="conf-bar-wrap">'
-                        f'  <div style="width:150px;font-size:.85rem;color:#1f2328;">{vn}</div>'
-                        f'  <div class="conf-bar-bg"><div class="conf-bar-fill" style="width:{pct}%;background:{color};"></div></div>'
-                        f'  <div style="width:40px;font-size:.85rem;color:{color};text-align:right;font-weight:700;">{pct}%</div>'
-                        f'  <div style="width:100px;font-size:.78rem;color:#57606a;">{d["Chiều rộng"]}×{d["Chiều cao"]}px</div>'
-                        f'</div>'
-                    )
-                bars += "</div>"
-                st.markdown(bars, unsafe_allow_html=True)
+    with tab_list:
+        cfg = {"Tin cậy (%)": st.column_config.ProgressColumn("Tin cậy", min_value=0, max_value=100, format="%.0f%%")}
+        stretch(st.dataframe, df, hide_index=True, column_config=cfg)
 
-                st.markdown("")
-                df = pd.DataFrame(detections)
-                df["Tin cậy"] = df["Tin cậy"].apply(lambda x: f"{x:.1%}")
-                st.dataframe(df, hide_index=True, use_container_width=True)
+    with tab_stat:
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Số lượng theo lớp**")
+            top = max(counter.values())
+            html = "".join(
+                f'<div class="bar-row"><div style="width:110px;">{CLASS_DESC[c]}</div>'
+                f'<div class="bar-bg"><div class="bar-fill" style="width:{n / top * 100:.0f}%;background:{CLASS_COLORS[c]};"></div></div>'
+                f'<div style="width:28px;text-align:right;font-weight:700;">{n}</div></div>'
+                for c, n in counter.most_common())
+            st.markdown(html, unsafe_allow_html=True)
+        with right:
+            st.markdown("**Độ tin cậy trung bình theo lớp**")
+            html = ""
+            for c, _ in counter.most_common():
+                avg = sum(d["conf"] for d in dets if d["cls"] == c) / counter[c]
+                html += (f'<div class="bar-row"><div style="width:110px;">{CLASS_DESC[c]}</div>'
+                         f'<div class="bar-bg"><div class="bar-fill" style="width:{avg * 100:.0f}%;background:{conf_color(avg)};"></div></div>'
+                         f'<div style="width:42px;text-align:right;font-weight:700;color:{conf_color(avg)};">{avg:.0%}</div></div>')
+            st.markdown(html, unsafe_allow_html=True)
+
+    buf = io.BytesIO()
+    annotated.save(buf, format="PNG")
+    d1, d2, d3 = st.columns([1, 1, 3])
+    d1.download_button("⬇️  Tải ảnh kết quả", buf.getvalue(), "pcb_detection_result.png", "image/png")
+    d2.download_button("⬇️  Tải CSV", df.to_csv(index=False).encode("utf-8-sig"), "pcb_detections.csv", "text/csv")
+    st.caption("Mô hình còn hạn chế (mAP50 ≈ 28% trên tập test): hãy kiểm tra lại các box có độ tin cậy thấp.")
+
+
+# ───────────────────────── HIỆU SUẤT ─────────────────────────
+def page_perf() -> None:
+    section("Hiệu suất và đánh giá mô hình")
+    t_over, t_cls, t_curve, t_cm = st.tabs(["Tổng quan", "Theo lớp", "Đường cong huấn luyện", "Ma trận nhầm lẫn"])
+
+    with t_over:
+        st.markdown("**Kết quả trên tập test** (46 ảnh, 670 đối tượng)")
+        cols = st.columns(4)
+        for col, (k, v) in zip(cols, TEST_OVERALL.items()):
+            col.metric(k, f"{v:.1%}")
+        st.markdown("")
+        p1, p2, p3 = st.columns(3)
+        p1.markdown('<div class="card"><h3>Kiến trúc</h3><p><b>YOLO26n</b>, 2,39 triệu tham số<br>Pretrained COCO<br>Input 640×640</p></div>', unsafe_allow_html=True)
+        p2.markdown('<div class="card"><h3>Huấn luyện</h3><p>Tối đa 100 epoch (patience 20)<br>Dừng sớm ≈ epoch 94, tốt nhất epoch 74<br>Batch 16 · AdamW · LR 0,001</p></div>', unsafe_allow_html=True)
+        p3.markdown('<div class="card"><h3>Augmentation</h3><p>Mosaic 1,0 · Mixup 0,15<br>CopyPaste 0,3 · Rotate ±90°<br>FlipUD 0,5 · FlipLR 0,5</p></div>', unsafe_allow_html=True)
+        st.markdown("**Dữ liệu**")
+        d = st.columns(4)
+        d[0].metric("Tổng ảnh hợp lệ", "460")
+        d[1].metric("Train (80%)", "368 ảnh")
+        d[2].metric("Val (10%)", "46 ảnh")
+        d[3].metric("Test (10%)", "46 ảnh")
+        st.markdown("**Phân bố đối tượng theo lớp (tập test)**")
+        st.bar_chart(pd.Series(TEST_CLASS_COUNTS, name="Số đối tượng"))
+
+    with t_cls:
+        csv_path = next((r / "evaluation_metrics.csv" for r in ASSET_ROOTS if (r / "evaluation_metrics.csv").is_file()), None)
+        if csv_path is None:
+            st.warning("Không tìm thấy file `evaluation_metrics.csv` trong thư mục assets.")
         else:
-            st.warning(
-                "Không tìm thấy linh kiện nào với ngưỡng tin cậy hiện tại.\n\n"
-                "Thử **giảm Ngưỡng tin cậy** trong phần Cài đặt ở trên."
-            )
+            dm = pd.read_csv(csv_path)
+            metrics = ["Precision", "Recall", "mAP50", "mAP50-95"]
+            view = dm.copy()
+            view["Class"] = view["Class"].map(lambda c: f"{CLASS_DESC.get(c, c)} ({c})")
+            view[metrics] = view[metrics] * 100
+            cfg = {m: st.column_config.ProgressColumn(m, min_value=0, max_value=100, format="%.1f%%") for m in metrics}
+            stretch(st.dataframe, view, hide_index=True, column_config=cfg)
+            st.markdown("**mAP50 theo lớp**")
+            st.bar_chart(dm.set_index("Class")["mAP50"])
+            weak = dm[dm["mAP50"] < 0.10]["Class"].tolist()
+            if weak:
+                st.warning("Các lớp mAP50 dưới 10% (ít mẫu, cần thêm dữ liệu): " + ", ".join(CLASS_DESC.get(c, c) for c in weak))
+            avg = dm[metrics].mean()
+            st.caption("Trung bình các lớp (macro): " + " · ".join(f"{m} {avg[m]:.1%}" for m in metrics))
 
-        buf = io.BytesIO()
-        annotated.save(buf, format="PNG")
-        st.download_button(
-            label="⬇️  Tải ảnh kết quả xuống",
-            data=buf.getvalue(),
-            file_name="pcb_detection_result.png",
-            mime="image/png",
-        )
+    with t_curve:
+        p = find_asset("comprehensive_training_metrics.png")
+        if p:
+            stretch(st.image, str(p), caption="Loss, Precision, Recall, mAP50 và mAP50-95 theo epoch")
+        else:
+            st.info("Chưa có ảnh `comprehensive_training_metrics.png`.")
+        q = find_asset("training_curve.png")
+        if q:
+            with st.expander("Biểu đồ gốc của Ultralytics"):
+                stretch(st.image, str(q))
+        st.info("Loss validation xấp xỉ loss train: mô hình chưa overfit mà có dấu hiệu underfit. mAP50 đạt đỉnh ≈ 0,27 quanh epoch 67–74.")
+
+    with t_cm:
+        p = find_asset("confusion_matrix.png")
+        if p:
+            stretch(st.image, str(p), caption="Confusion matrix trên tập test")
+            st.info("**Cách đọc:** cột = nhãn thật, hàng = dự đoán. Ô chéo = dự đoán đúng. "
+                    "Ô 'background' ở **cột cuối** là dự đoán sai trên nền (false positive); "
+                    "ô 'background' ở **hàng cuối** là linh kiện bị bỏ sót (false negative).")
+        else:
+            st.info("Chưa có ảnh `confusion_matrix.png`.")
 
 
-# ══════════════════════════════════════════════════════
-#  PAGE: PERFORMANCE
-# ══════════════════════════════════════════════════════
-elif active_page == "perf":
-    st.markdown('<div class="section-title">Hiệu suất & Đánh giá mô hình</div>', unsafe_allow_html=True)
-
-    st.markdown("### Cấu hình huấn luyện")
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        st.markdown("""<div class="card">
-            <h3>Kiến trúc</h3>
-            <p><b>YOLO26 Nano (yolo26n)</b><br>
-            Pretrained trên COCO (transfer learning)<br>Input: 640×640 px</p>
-        </div>""", unsafe_allow_html=True)
-    with p2:
-        st.markdown("""<div class="card">
-            <h3>Hyperparameters</h3>
-            <p>Epochs: <b>100</b> (patience=20)<br>
-            Batch: <b>16</b> · Optimizer: <b>AdamW</b><br>LR: <b>0.001</b></p>
-        </div>""", unsafe_allow_html=True)
-    with p3:
-        st.markdown("""<div class="card">
-            <h3>Data Augmentation</h3>
-            <p>Mosaic=1.0 · Mixup=0.15<br>
-            CopyPaste=0.3 · Rotate±90°<br>FlipUD=0.5 · FlipLR=0.5</p>
-        </div>""", unsafe_allow_html=True)
-
-    st.divider()
-    st.markdown("### Chỉ số đánh giá theo class")
-
-    if METRICS_CSV.is_file():
-        df_m = pd.read_csv(METRICS_CSV)
-        styled = (
-            df_m.style
-            .format({"Precision": "{:.1%}", "Recall": "{:.1%}", "mAP50": "{:.1%}", "mAP50-95": "{:.1%}"})
-            .background_gradient(subset=["Precision", "Recall", "mAP50", "mAP50-95"], cmap="Blues")
-            .set_properties(**{"text-align": "center"})
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-
-        avg = df_m.drop(columns=["Class"]).mean()
-        a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Avg Precision",  f"{avg['Precision']:.1%}")
-        a2.metric("Avg Recall",     f"{avg['Recall']:.1%}")
-        a3.metric("Avg mAP50",      f"{avg['mAP50']:.1%}")
-        a4.metric("Avg mAP50-95",   f"{avg['mAP50-95']:.1%}")
+# ───────────────────────── GALLERY ─────────────────────────
+def page_gallery() -> None:
+    section("Gallery kết quả nhận diện mẫu")
+    st.markdown("<p style='color:#57606a;'>Kết quả trên tập test, kèm khung, tên linh kiện và độ tin cậy.</p>", unsafe_allow_html=True)
+    imgs = glob_assets("prediction_*.jpg")
+    if not imgs:
+        st.warning("Chưa có ảnh mẫu `prediction_*.jpg` trong thư mục assets.")
     else:
-        st.warning("Không tìm thấy file `assest/evaluation_metrics.csv`.")
-
-    st.divider()
-    st.markdown("### Đường cong huấn luyện")
-    curve = GRAPH_DIR / "comprehensive_training_metrics.png"
-    if curve.is_file():
-        st.image(str(curve), caption="Box Loss · Cls Loss · Precision · Recall · mAP50 · mAP50-95 theo epoch", use_container_width=True)
-    else:
-        st.info("Chưa có ảnh `comprehensive_training_metrics.png`.")
-
-    st.divider()
-    st.markdown("### Ma trận nhầm lẫn (Confusion Matrix)")
-    cm = GRAPH_DIR / "confusion_matrix.png"
-    if cm.is_file():
-        st.image(str(cm), caption="Confusion Matrix trên tập test", use_container_width=True)
-        st.info("Ô chéo chính (màu đậm) = dự đoán đúng. Cột 'background' = linh kiện bị bỏ sót (false negative).")
-
-    st.divider()
-    st.markdown("### Thống kê dataset")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Tổng ảnh hợp lệ", "460")
-    d2.metric("Train (80%)",  "368 ảnh")
-    d3.metric("Val (10%)",    "46 ảnh")
-    d4.metric("Test (10%)",   "46 ảnh")
-
-
-# ══════════════════════════════════════════════════════
-#  PAGE: GALLERY
-# ══════════════════════════════════════════════════════
-elif active_page == "gallery":
-    st.markdown('<div class="section-title">Gallery kết quả nhận diện mẫu</div>', unsafe_allow_html=True)
-    st.markdown(
-        "<p style='color:#57606a;'>Kết quả nhận diện thực tế trên tập test — "
-        "bounding box kèm tên linh kiện và độ tin cậy.</p>",
-        unsafe_allow_html=True,
-    )
-
-    pred_imgs = sorted(PRED_DIR.glob("prediction_*.jpg"))
-    if not pred_imgs:
-        st.warning("Chưa có ảnh mẫu trong `assest/pred/`.")
-    else:
-        for row_start in range(0, len(pred_imgs), 3):
-            cols = st.columns(3)
-            for col, img_path in zip(cols, pred_imgs[row_start: row_start + 3]):
+        n = st.select_slider("Số cột", options=[1, 2, 3, 4], value=3)
+        for start in range(0, len(imgs), n):
+            cols = st.columns(n)
+            for col, p in zip(cols, imgs[start:start + n]):
                 with col:
-                    st.image(
-                        Image.open(img_path),
-                        caption=img_path.stem.replace("_", " ").title(),
-                        use_container_width=True,
-                    )
+                    stretch(st.image, str(p), caption=p.stem.replace("prediction_", "Mẫu "))
+    sample = find_asset("test_predictions_sample.png")
+    if sample:
+        section("Tổng hợp ảnh mẫu test")
+        stretch(st.image, str(sample))
 
-    sample = PRED_DIR / "test_predictions_sample.png"
-    if sample.is_file():
-        st.divider()
-        st.markdown("### Tổng hợp ảnh mẫu test")
-        st.image(str(sample), caption="test_predictions_sample.png", use_container_width=True)
+
+{"home": page_home, "detect": page_detect, "perf": page_perf, "gallery": page_gallery}[page]()
