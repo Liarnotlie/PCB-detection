@@ -286,31 +286,12 @@ MENU = {"🏠  Trang chủ": "home", "🔍  Nhận diện": "detect",
         "📊  Hiệu suất mô hình": "perf", "🖼️  Gallery mẫu": "gallery"}
 with st.sidebar:
     st.markdown(
-        """
-        <div style="text-align: center; padding: 12px 0 20px 0;">
-            <div style="font-size: 2.8rem; line-height: 1;">🔬</div>
-            <h2 style="font-size: 1.25rem; font-weight: 700; color: #0969da; margin: 8px 0 2px 0;">PCB Detector</h2>
-            <p style="font-size: 0.8rem; color: #57606a; margin: 0;">YOLO26 Component Analysis</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("**Menu điều hướng**")
-    MENU_OPTIONS = [
-        "🏠  Trang chủ",
-        "🔍  Nhận diện",
-        "📊  Hiệu suất mô hình",
-        "🖼️  Gallery mẫu",
-    ]
-
-    selected_menu = st.radio(
-        "Chọn chức năng",
-        options=MENU_OPTIONS,
-        index=0,
-        label_visibility="collapsed",
-    )
-
+        """<div style="text-align:center;padding:10px 0 18px;">
+        <div style="font-size:2.6rem;line-height:1;">🔬</div>
+        <h2 style="font-size:1.25rem;font-weight:800;color:#0969da;margin:8px 0 2px;">PCB Detector</h2>
+        <p style="font-size:.8rem;color:#57606a;margin:0;">YOLO26n Component Analysis</p></div>""",
+        unsafe_allow_html=True)
+    choice = st.radio("Điều hướng", list(MENU), label_visibility="collapsed")
     st.markdown("---")
     st.markdown(
         """<div style="font-size:.78rem;color:#57606a;line-height:1.7;"><b>Thông tin hệ thống</b><br>
@@ -322,21 +303,11 @@ page = MENU[choice]
 # ───────────────────────── TRANG CHỦ ─────────────────────────
 def page_home() -> None:
     st.markdown(
-        """
-        <div class="hero">
-            <h1>🔬 PCB Component Detector</h1>
-            <p>
-                Hệ thống nhận diện linh kiện điện tử trên bo mạch in (PCB)<br>
-                sử dụng mô hình <b>YOLO26</b> huấn luyện trên <b>460 ảnh</b> thực tế.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Stat pills
-    st.markdown(
-        """
+        """<div class="hero"><h1>🔬 PCB Component Detector</h1>
+        <p>Nhận diện linh kiện điện tử trên bo mạch in (PCB)<br>
+        bằng <b>YOLO26n</b>, huấn luyện trên <b>460 ảnh</b> với <b>10 loại linh kiện</b>.</p>
+        <div class="tags"><span class="tag">Phát hiện đối tượng</span><span class="tag">Transfer learning</span>
+        <span class="tag">Suy luận thời gian thực</span></div></div>
         <div class="stat-row">
         <div class="stat-pill"><div class="val">460</div><div class="lbl">Ảnh dữ liệu</div></div>
         <div class="stat-pill"><div class="val">10</div><div class="lbl">Loại linh kiện</div></div>
@@ -361,25 +332,18 @@ def page_home() -> None:
             <div class="n">{CLASS_DESC[c]}</div><div class="d">{CLASS_SUB[c]}</div></div>""",
             unsafe_allow_html=True)
 
-    # Pipeline
-    st.markdown('<div class="section-title">Pipeline xử lý</div>', unsafe_allow_html=True)
-    pipe_cols = st.columns(4)
-    pipe_steps = [
-        ("📥", "Thu thập dữ liệu",   "460 ảnh PCB thực tế, gán nhãn bằng LabelImg"),
-        ("🧹", "Tiền xử lý",         "Chuẩn hóa bbox, sửa 92 box lỗi, chia 80/10/10%"),
-        ("🧠", "Huấn luyện YOLO26",  "Transfer learning từ COCO, Mosaic + Mixup augmentation"),
-        ("🔬", "Triển khai",          "Streamlit web app, chạy local, inference real-time"),
-    ]
-    for col, (icon, title, desc) in zip(pipe_cols, pipe_steps):
-        with col:
-            st.markdown(
-                f"""<div class="card" style="text-align:center;">
-                    <div style="font-size:2rem;">{icon}</div>
-                    <h3 style="font-size:.93rem;margin-top:8px;">{title}</h3>
-                    <p style="font-size:.82rem;">{desc}</p>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+    section("Pipeline xử lý")
+    pipe = [("📥", "Thu thập dữ liệu", "460 ảnh PCB, nhãn định dạng YOLO"),
+            ("🧹", "Chuẩn hoá", "Clip bbox, sửa 92 box lỗi, chia 80/10/10"),
+            ("🧠", "Huấn luyện", "YOLO26n, transfer từ COCO, mosaic + mixup"),
+            ("🚀", "Triển khai", "Ứng dụng Streamlit chạy local")]
+    for col, (ic, t, d) in zip(st.columns(4), pipe):
+        col.markdown(f'<div class="card" style="text-align:center;"><div style="font-size:2rem;">{ic}</div>'
+                     f'<h3 style="margin-top:8px;">{t}</h3><p>{d}</p></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="note"><b>Lưu ý:</b> đây là bản mẫu. Mô hình mạnh ở connector, IC, LED, nút bấm; '
+                'còn yếu ở điện trở / tụ điện (dễ nhầm nhau) và các lớp hiếm (diode, transistor, inductor, jumper). '
+                'Hãy kiểm tra lại kết quả trước khi dùng thực tế.</div>', unsafe_allow_html=True)
 
 
 # ───────────────────────── NHẬN DIỆN ─────────────────────────
@@ -403,62 +367,43 @@ def page_detect() -> None:
         show_labels = t2.toggle("Hiện nhãn trên ảnh", True)
         show_conf = t3.toggle("Hiện % tin cậy", True)
 
-    uploaded_file = st.file_uploader(
-        "Kéo thả hoặc chọn ảnh PCB (JPG · JPEG · PNG · BMP · WEBP)",
-        type=["jpg", "jpeg", "png", "bmp", "webp"],
-    )
+    up = st.file_uploader("Kéo thả hoặc chọn ảnh PCB (JPG · PNG · BMP · WEBP)",
+                          type=["jpg", "jpeg", "png", "bmp", "webp"])
+    data: bytes | None = up.getvalue() if up else None
+    samples = sample_images()
+    if data is None and samples:
+        pick = st.selectbox("Hoặc thử một ảnh mẫu", ["— Không dùng —"] + [p.name for p in samples])
+        if pick != "— Không dùng —":
+            data = next(p for p in samples if p.name == pick).read_bytes()
 
-    if uploaded_file is None:
-        st.markdown(
-            """<div style='text-align:center; padding:60px 0; color:#57606a;'>
-                <div style='font-size:3rem;'>📤</div>
-                <div style='font-size:1.1rem; margin-top:14px; font-weight:600;'>
-                    Tải ảnh PCB lên để bắt đầu nhận diện
-                </div>
-                <div style='font-size:.85rem; margin-top:6px;'>
-                    Hỗ trợ: JPG, JPEG, PNG, BMP, WEBP
-                </div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-    else:
-        image = Image.open(uploaded_file).convert("RGB")
-        model = load_model(str(MODEL_PATH))
+    if data is None:
+        st.markdown("""<div style="text-align:center;padding:56px 0;color:#57606a;"><div style="font-size:3rem;">📤</div>
+            <div style="font-size:1.1rem;margin-top:12px;font-weight:600;">Tải ảnh PCB lên để bắt đầu nhận diện</div>
+            <div style="font-size:.85rem;margin-top:6px;">Ảnh chụp thẳng, đủ sáng và rõ nét cho kết quả tốt hơn</div></div>""",
+                    unsafe_allow_html=True)
+        return
 
-        with st.spinner("Đang phân tích ảnh với YOLO26…"):
-            t0     = time.perf_counter()
-            result = model.predict(image, conf=confidence, iou=iou, verbose=False)[0]
-            elapsed_ms = (time.perf_counter() - t0) * 1000
+    image = load_image(data)
+    with st.spinner("Đang phân tích ảnh với YOLO26n…"):
+        all_dets, ms = run_inference(data, conf, iou, imgsz)
+    dets = [d for d in all_dets if d["cls"] in classes]
+    counter = Counter(d["cls"] for d in dets)
+    annotated = draw_detections(image, dets, show_labels, show_conf)
 
-        annotated = Image.fromarray(result.plot()[..., ::-1])
+    m = st.columns(4)
+    m[0].metric("Linh kiện phát hiện", len(dets))
+    m[1].metric("Số loại", len(counter))
+    m[2].metric("Thời gian suy luận", f"{ms:.0f} ms")
+    m[3].metric("Độ tin cậy trung bình", f"{(sum(d['conf'] for d in dets) / len(dets)):.0%}" if dets else "—")
 
-        detections: list[dict] = []
-        if result.boxes is not None:
-            for box in result.boxes:
-                cid  = int(box.cls.item())
-                conf = float(box.conf.item())
-                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-                w, h = x2 - x1, y2 - y1
-                detections.append({
-                    "Linh kiện":           result.names[cid],
-                    "Tin cậy":             round(conf, 3),
-                    "Chiều rộng":          round(w),
-                    "Chiều cao":           round(h),
-                    "Tọa độ (x1,y1,x2,y2)": f"({x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f})",
-                })
+    if not dets:
+        st.warning("Không có linh kiện nào với thiết lập hiện tại. Thử **giảm ngưỡng tin cậy**, tăng kích thước suy luận hoặc chọn thêm lớp.")
+        return
 
-        counter = Counter(d["Linh kiện"] for d in detections)
+    tab_img, tab_list, tab_stat = st.tabs(["🖼️  Hình ảnh", "📋  Danh sách", "📈  Thống kê"])
 
-        # Quick metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Linh kiện phát hiện", len(detections))
-        m2.metric("Loại khác nhau",      len(counter))
-        m3.metric("Thời gian suy luận",  f"{elapsed_ms:.0f} ms")
-        m4.metric("Ngưỡng tin cậy",      f"{confidence:.0%}")
-
-        st.divider()
-
-        # Images
+    with tab_img:
+        st.markdown(legend(c for c in CLASS_DESC if c in counter), unsafe_allow_html=True)
         if show_original:
             a, b = st.columns(2)
             a.markdown("**Ảnh gốc**")

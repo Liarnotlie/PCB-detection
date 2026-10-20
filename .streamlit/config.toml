@@ -5,6 +5,6 @@ backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#f6f8fa"
 textColor = "#1f2328"
 font = "sans serif"
-
+ 
 [browser]
 gatherUsageStats = false
