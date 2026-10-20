@@ -37,7 +37,7 @@
 - **mAP50-95:** Độ chính xác khắt khe trên toàn dải IoU từ 0.5 đến 0.95.
 
 ## 5. Assets & Prediction Samples (Kết quả trực quan)
-Toàn bộ biểu đồ training, ma trận nhầm lẫn và mẫu dự đoán được lưu tại `assets/results/`:
+Toàn bộ biểu đồ training, ma trận nhầm lẫn và mẫu dự đoán được lưu tại `assets/`:
 - `training_curves.png` / `comprehensive_training_metrics.png`
 - `confusion_matrix.png`
 - `test_predictions_sample.png`
