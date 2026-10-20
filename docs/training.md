@@ -1,4 +1,4 @@
-# Báo cáo Huấn luyện & Đánh giá Mô hình YOLO (PCB Component Detection)
+# Báo cáo Huấn luyện & Đánh giá Mô hình YOLO26n (PCB Component Detection)
 
 ## 1. Class Names (Danh sách 10 lớp linh kiện)
 0. `resistor` (Điện trở)
@@ -13,7 +13,7 @@
 9. `button` (Nút bấm)
 
 ## 2. Model Configuration (Cấu hình Mô hình)
-- **Architecture:** YOLOv8 / YOLO (Nano/Small)
+- **Architecture:** YOLO26n (Nano)
 - **Pretrained Weights:** `yolo26n.pt` (Transfer Learning từ tập COCO)
 - **Input Image Size:** $640 	imes 640$ pixels
 - **Model Weights Path:** `model/best.pt`

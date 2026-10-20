@@ -1,13 +1,13 @@
 # Báo Cáo Triển Khai & Ứng Dụng (Deployment Documentation)
 
-Tài liệu này tổng hợp cấu hình inference pipeline, ứng dụng web Streamlit và hướng dẫn triển khai cho mô hình YOLO Object Detection.
+Tài liệu này tổng hợp cấu hình inference pipeline, ứng dụng web Streamlit và hướng dẫn triển khai cho mô hình YOLO26n Object Detection.
 
 ## 1. Inference Pipeline & Post-processing
 Mã nguồn xử lý: `app/app.py` (và `src/inference.py`)
 
 Quy trình nhận diện và xử lý kết quả:
 1. **Tiền xử lý:** Nhận ảnh đầu vào từ người dùng (JPG, PNG, BMP, WEBP), chuẩn hóa kênh màu RGB và đưa về kích thước 640×640 px theo chuẩn YOLO.
-2. **Suy luận (Inference):** Nạp model `model/best.pt`, dự đoán bounding box, nhãn linh kiện và điểm tin cậy (confidence score) với ngưỡng tùy chỉnh.
+2. **Suy luận (Inference):** Nạp trọng số YOLO26n tại `model/best.pt`, dự đoán bounding box, nhãn linh kiện và điểm tin cậy (confidence score) với ngưỡng tùy chỉnh.
 3. **Hậu xử lý (Post-processing):**
    - Lọc bỏ dự đoán có độ tin cậy thấp hơn ngưỡng quy định.
    - Áp dụng Non-Maximum Suppression (IoU threshold) để khử trùng lặp bounding box.
@@ -22,7 +22,7 @@ Giao diện ứng dụng được tổ chức thành 4 phân hệ chính:
 
 ### Ảnh demo ứng dụng
 
-Ảnh dưới đây minh họa ảnh PCB đầu vào và kết quả nhận diện do YOLO tạo ra:
+Ảnh dưới đây minh họa ảnh PCB đầu vào và kết quả nhận diện do YOLO26n tạo ra:
 
 <table>
   <tr>
@@ -31,7 +31,7 @@ Giao diện ứng dụng được tổ chức thành 4 phân hệ chính:
   </tr>
   <tr>
     <td align="center"><img src="../assest/demo/demo_input.jpg" alt="Ảnh PCB đầu vào" width="400"></td>
-    <td align="center"><img src="../assest/demo/demo_output.png" alt="Ảnh PCB sau khi YOLO nhận diện linh kiện" width="400"></td>
+    <td align="center"><img src="../assest/demo/demo_output.png" alt="Ảnh PCB sau khi YOLO26n nhận diện linh kiện" width="400"></td>
   </tr>
 </table>
 
