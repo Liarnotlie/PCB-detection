@@ -1,14 +1,13 @@
 """
-PCB Component Detection — Streamlit Web Application (v2)
+PCB Component Detection — Streamlit Web Application (v3)
 Giao diện sáng · Menu bên trái · Màu riêng cho từng lớp · Biểu tượng sơ đồ SVG
+Số liệu đã đối chiếu với eda.ipynb, evaluation_metrics.csv, confusion_matrix.png và các biểu đồ huấn luyện.
 Chạy:  streamlit run app/app.py   (đặt .streamlit/config.toml ở thư mục gốc dự án)
 """
 from __future__ import annotations
 
 import base64
 import io
-import json
-import time
 from collections import Counter
 from pathlib import Path
 
@@ -72,10 +71,42 @@ CLASS_COLORS = {
     "ic": "#8250df", "led": "#d4a72c", "diode": "#bf3989", "transistor": "#0e8a9b",
     "inductor": "#fb8500", "jumper": "#6e7781", "button": "#1f6f43",
 }
+ACCENT = "#0969da"
+
+# --- Số liệu EDA (eda.ipynb: toàn bộ 460 ảnh, 6.630 đối tượng) ---
+DATASET_CLASS_COUNTS = {"capacitor": 2292, "resistor": 1963, "connector": 900, "ic": 636, "led": 453,
+                        "jumper": 100, "button": 79, "diode": 76, "inductor": 68, "transistor": 63}
+N_IMAGES = 460
+N_OBJECTS = sum(DATASET_CLASS_COUNTS.values())              # 6630
+AVG_OBJ_PER_IMG = 14.41                                      # EDA: 6630 / 460
+MAX_OBJ_PER_IMG = 15                                         # EDA
+IMBALANCE = max(DATASET_CLASS_COUNTS.values()) / min(DATASET_CLASS_COUNTS.values())   # 36,38 (capacitor / transistor)
+SPLIT = {"Train": 368, "Val": 46, "Test": 46}                # 80 / 10 / 10, seed 42
+
+# --- Kết quả trên tập test (evaluation_metrics.csv: trung bình macro 10 lớp) ---
 TEST_OVERALL = {"Precision": 0.236, "Recall": 0.374, "mAP50": 0.281, "mAP50-95": 0.197}
 TEST_CLASS_COUNTS = {"capacitor": 202, "resistor": 199, "connector": 101, "ic": 76, "led": 51,
                      "diode": 11, "button": 10, "jumper": 9, "transistor": 7, "inductor": 4}
-ACCENT = "#0969da"
+TEST_OBJECTS = sum(TEST_CLASS_COUNTS.values())               # 670
+
+# --- Confusion matrix (confusion_matrix.png; cột = nhãn thật, hàng = dự đoán) ---
+CM_DIAG = {"resistor": 98, "capacitor": 123, "connector": 83, "ic": 47, "led": 24,
+           "diode": 1, "transistor": 2, "inductor": 1, "jumper": 3, "button": 6}
+CM_FP_BG = {"resistor": 3250, "capacitor": 4254, "connector": 1288, "ic": 884, "led": 1154,
+            "diode": 221, "transistor": 98, "inductor": 222, "jumper": 304, "button": 105}   # dự đoán lớp X trên nền
+CM_FN_BG = {"resistor": 45, "capacitor": 35, "connector": 10, "ic": 10, "led": 9,
+            "diode": 1, "transistor": 3, "inductor": 1, "jumper": 2, "button": 0}            # linh kiện thật bị bỏ sót
+CM_TOP_CONFUSIONS = [("resistor", "capacitor", 23), ("capacitor", "resistor", 22), ("capacitor", "led", 16),
+                     ("resistor", "ic", 13), ("led", "capacitor", 10), ("resistor", "inductor", 10)]  # (thật → dự đoán, số lượng)
+
+
+def fmt_int(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def fmt_dec(x: float, d: int = 1) -> str:
+    return f"{x:.{d}f}".replace(".", ",")
+
 
 # ───────────────────────── CSS ─────────────────────────
 st.markdown(
@@ -126,6 +157,7 @@ html, body, [class*="css"], .stMarkdown, button, input { font-family: 'Inter', '
 .comp-card:hover { border-color: #0969da; box-shadow: 0 6px 18px rgba(9,105,218,.12); transform: translateY(-2px); }
 .comp-card .n { font-size: .92rem; font-weight: 700; color: #1f2328; margin: 10px 0 3px; }
 .comp-card .d { font-size: .76rem; color: #57606a; }
+.comp-card .c { font-size: .72rem; color: #0969da; font-weight: 600; margin-top: 4px; }
 .section-title { font-size: 1.3rem; font-weight: 700; color: #1f2328; border-left: 4px solid #0969da;
     padding-left: 14px; margin: 30px 0 16px; }
 .note { background: #fff8c5; border: 1px solid #eac54f; border-radius: 12px; padding: 12px 16px; font-size: .86rem; color: #4d2d00; }
@@ -294,25 +326,27 @@ with st.sidebar:
     choice = st.radio("Điều hướng", list(MENU), label_visibility="collapsed")
     st.markdown("---")
     st.markdown(
-        """<div style="font-size:.78rem;color:#57606a;line-height:1.7;"><b>Thông tin hệ thống</b><br>
-        • Mô hình: YOLO26n (transfer từ COCO)<br>• 10 lớp linh kiện<br>• 460 ảnh: 368 / 46 / 46<br>
-        • mAP50 (test): 28,1%</div>""", unsafe_allow_html=True)
+        f"""<div style="font-size:.78rem;color:#57606a;line-height:1.7;"><b>Thông tin hệ thống</b><br>
+        • Mô hình: YOLO26n (transfer từ COCO)<br>• 10 lớp linh kiện<br>
+        • {N_IMAGES} ảnh · {fmt_int(N_OBJECTS)} đối tượng<br>
+        • Chia dữ liệu: {SPLIT['Train']} / {SPLIT['Val']} / {SPLIT['Test']} ảnh<br>
+        • mAP50 (test): {fmt_dec(TEST_OVERALL['mAP50'] * 100)}%</div>""", unsafe_allow_html=True)
 page = MENU[choice]
 
 
 # ───────────────────────── TRANG CHỦ ─────────────────────────
 def page_home() -> None:
     st.markdown(
-        """<div class="hero"><h1>🔬 PCB Component Detector</h1>
+        f"""<div class="hero"><h1>🔬 PCB Component Detector</h1>
         <p>Nhận diện linh kiện điện tử trên bo mạch in (PCB)<br>
-        bằng <b>YOLO26n</b>, huấn luyện trên <b>460 ảnh</b> với <b>10 loại linh kiện</b>.</p>
+        bằng <b>YOLO26n</b>, huấn luyện trên <b>{N_IMAGES} ảnh</b> ({fmt_int(N_OBJECTS)} đối tượng) với <b>10 loại linh kiện</b>.</p>
         <div class="tags"><span class="tag">Phát hiện đối tượng</span><span class="tag">Transfer learning</span>
-        <span class="tag">Suy luận thời gian thực</span></div></div>
+        <span class="tag">Ứng dụng Streamlit chạy local</span></div></div>
         <div class="stat-row">
-        <div class="stat-pill"><div class="val">460</div><div class="lbl">Ảnh dữ liệu</div></div>
+        <div class="stat-pill"><div class="val">{N_IMAGES}</div><div class="lbl">Ảnh dữ liệu</div></div>
+        <div class="stat-pill"><div class="val">{fmt_int(N_OBJECTS)}</div><div class="lbl">Đối tượng được gán nhãn</div></div>
         <div class="stat-pill"><div class="val">10</div><div class="lbl">Loại linh kiện</div></div>
-        <div class="stat-pill"><div class="val">28,1%</div><div class="lbl">mAP50 (tập test)</div></div>
-        <div class="stat-pill"><div class="val">5–10 ms</div><div class="lbl">Suy luận / ảnh (GPU T4)</div></div>
+        <div class="stat-pill"><div class="val">{fmt_dec(TEST_OVERALL['mAP50'] * 100)}%</div><div class="lbl">mAP50 (tập test)</div></div>
         <div class="stat-pill"><div class="val">640 px</div><div class="lbl">Kích thước huấn luyện</div></div></div>""",
         unsafe_allow_html=True)
 
@@ -329,21 +363,25 @@ def page_home() -> None:
         cols[i % 5].markdown(
             f"""<div class="comp-card" style="border-top:3px solid {CLASS_COLORS[c]};">
             <div style="display:flex;justify-content:center;align-items:center;height:52px;">{svg_img(COMPONENT_SVG[c], c)}</div>
-            <div class="n">{CLASS_DESC[c]}</div><div class="d">{CLASS_SUB[c]}</div></div>""",
+            <div class="n">{CLASS_DESC[c]}</div><div class="d">{CLASS_SUB[c]}</div>
+            <div class="c">{fmt_int(DATASET_CLASS_COUNTS[c])} đối tượng</div></div>""",
             unsafe_allow_html=True)
 
     section("Pipeline xử lý")
-    pipe = [("📥", "Thu thập dữ liệu", "460 ảnh PCB, nhãn định dạng YOLO"),
-            ("🧹", "Chuẩn hoá", "Clip bbox, sửa 92 box lỗi, chia 80/10/10"),
-            ("🧠", "Huấn luyện", "YOLO26n, transfer từ COCO, mosaic + mixup"),
+    pipe = [("📥", "Thu thập dữ liệu", f"{N_IMAGES} ảnh PCB, {fmt_int(N_OBJECTS)} box, nhãn định dạng YOLO"),
+            ("🧹", "Phân tích & chuẩn hoá", f"EDA, kiểm tra nhãn, chia 80/10/10 ({SPLIT['Train']}/{SPLIT['Val']}/{SPLIT['Test']} ảnh)"),
+            ("🧠", "Huấn luyện", "YOLO26n, transfer từ COCO, 94 epoch (tốt nhất epoch 74)"),
             ("🚀", "Triển khai", "Ứng dụng Streamlit chạy local")]
     for col, (ic, t, d) in zip(st.columns(4), pipe):
         col.markdown(f'<div class="card" style="text-align:center;"><div style="font-size:2rem;">{ic}</div>'
                      f'<h3 style="margin-top:8px;">{t}</h3><p>{d}</p></div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="note"><b>Lưu ý:</b> đây là bản mẫu. Mô hình mạnh ở connector, IC, LED, nút bấm; '
-                'còn yếu ở điện trở / tụ điện (dễ nhầm nhau) và các lớp hiếm (diode, transistor, inductor, jumper). '
-                'Hãy kiểm tra lại kết quả trước khi dùng thực tế.</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="note"><b>Lưu ý:</b> đây là bản mẫu. Mô hình khá tốt ở đầu nối (mAP50 57,2%), nút bấm (52,5%), IC (51,9%) '
+        f'và LED (44,8%); còn yếu ở điện trở (30,9%) và tụ điện (16,7%) vì hai lớp này hay bị nhầm với nhau, '
+        f'và rất yếu ở các lớp hiếm (diode, transistor, inductor, jumper: mAP50 dưới 10%, chỉ có 63–100 mẫu mỗi lớp trong '
+        f'{fmt_int(N_OBJECTS)} đối tượng). Dữ liệu mất cân bằng {fmt_dec(IMBALANCE, 1)} lần giữa lớp nhiều nhất (tụ điện) và ít nhất (transistor). '
+        f'Hãy kiểm tra lại kết quả trước khi dùng thực tế.</div>', unsafe_allow_html=True)
 
 
 # ───────────────────────── NHẬN DIỆN ─────────────────────────
@@ -356,10 +394,11 @@ def page_detect() -> None:
     with st.expander("⚙️  Cài đặt nhận diện", expanded=True):
         c1, c2, c3 = st.columns(3)
         conf = c1.slider("Ngưỡng tin cậy (Conf)", 0.05, 0.95, 0.20, 0.05,
-                         help="Chỉ giữ box có độ tin cậy ≥ ngưỡng. Mô hình thường cho điểm thấp (0,25–0,5), nên đừng đặt quá cao.")
+                         help="Chỉ giữ box có độ tin cậy ≥ ngưỡng. Mô hình còn yếu (mAP50 ≈ 28%) nên thường cho điểm thấp, đừng đặt quá cao.")
         iou = c2.slider("Ngưỡng IoU (NMS)", 0.10, 0.90, 0.45, 0.05, help="Giảm box trùng lặp.")
         imgsz = c3.select_slider("Kích thước suy luận", options=[640, 960, 1280], value=640,
-                                 help="Lớn hơn giúp bắt linh kiện nhỏ nhưng chậm hơn.")
+                                 help="Mô hình được huấn luyện ở 640 px. Ảnh gốc trong dữ liệu có cạnh từ ≈300 đến hơn 5000 px; "
+                                      "kích thước lớn hơn có thể giúp bắt linh kiện nhỏ nhưng chậm hơn.")
         classes = st.multiselect("Lớp hiển thị", list(CLASS_DESC), default=list(CLASS_DESC),
                                  format_func=lambda c: CLASS_DESC[c])
         t1, t2, t3 = st.columns(3)
@@ -449,7 +488,7 @@ def page_detect() -> None:
     d1, d2, d3 = st.columns([1, 1, 3])
     d1.download_button("⬇️  Tải ảnh kết quả", buf.getvalue(), "pcb_detection_result.png", "image/png")
     d2.download_button("⬇️  Tải CSV", df.to_csv(index=False).encode("utf-8-sig"), "pcb_detections.csv", "text/csv")
-    st.caption("Mô hình còn hạn chế (mAP50 ≈ 28% trên tập test): hãy kiểm tra lại các box có độ tin cậy thấp.")
+    st.caption(f"Mô hình còn hạn chế (mAP50 ≈ {TEST_OVERALL['mAP50'] * 100:.0f}% trên tập test): hãy kiểm tra lại các box có độ tin cậy thấp.")
 
 
 # ───────────────────────── HIỆU SUẤT ─────────────────────────
@@ -458,23 +497,37 @@ def page_perf() -> None:
     t_over, t_cls, t_curve, t_cm = st.tabs(["Tổng quan", "Theo lớp", "Đường cong huấn luyện", "Ma trận nhầm lẫn"])
 
     with t_over:
-        st.markdown("**Kết quả trên tập test** (46 ảnh, 670 đối tượng)")
+        st.markdown(f"**Kết quả trên tập test** ({SPLIT['Test']} ảnh, {TEST_OBJECTS} đối tượng; trung bình macro 10 lớp)")
         cols = st.columns(4)
         for col, (k, v) in zip(cols, TEST_OVERALL.items()):
             col.metric(k, f"{v:.1%}")
         st.markdown("")
         p1, p2, p3 = st.columns(3)
         p1.markdown('<div class="card"><h3>Kiến trúc</h3><p><b>YOLO26n</b>, 2,39 triệu tham số<br>Pretrained COCO<br>Input 640×640</p></div>', unsafe_allow_html=True)
-        p2.markdown('<div class="card"><h3>Huấn luyện</h3><p>Tối đa 100 epoch (patience 20)<br>Dừng sớm ≈ epoch 94, tốt nhất epoch 74<br>Batch 16 · AdamW · LR 0,001</p></div>', unsafe_allow_html=True)
+        p2.markdown('<div class="card"><h3>Huấn luyện</h3><p>Tối đa 100 epoch (patience 20)<br>Dừng sớm tại epoch 94, tốt nhất epoch 74<br>Batch 16 · AdamW · LR 0,001</p></div>', unsafe_allow_html=True)
         p3.markdown('<div class="card"><h3>Augmentation</h3><p>Mosaic 1,0 · Mixup 0,15<br>CopyPaste 0,3 · Rotate ±90°<br>FlipUD 0,5 · FlipLR 0,5</p></div>', unsafe_allow_html=True)
-        st.markdown("**Dữ liệu**")
+
+        st.markdown("**Dữ liệu (kết quả EDA)**")
         d = st.columns(4)
-        d[0].metric("Tổng ảnh hợp lệ", "460")
-        d[1].metric("Train (80%)", "368 ảnh")
-        d[2].metric("Val (10%)", "46 ảnh")
-        d[3].metric("Test (10%)", "46 ảnh")
-        st.markdown("**Phân bố đối tượng theo lớp (tập test)**")
-        st.bar_chart(pd.Series(TEST_CLASS_COUNTS, name="Số đối tượng"))
+        d[0].metric("Tổng ảnh hợp lệ", f"{N_IMAGES}")
+        d[1].metric(f"Train (80%)", f"{SPLIT['Train']} ảnh")
+        d[2].metric(f"Val (10%)", f"{SPLIT['Val']} ảnh")
+        d[3].metric(f"Test (10%)", f"{SPLIT['Test']} ảnh")
+        e = st.columns(4)
+        e[0].metric("Tổng số đối tượng", fmt_int(N_OBJECTS))
+        e[1].metric("Đối tượng / ảnh (TB)", fmt_dec(AVG_OBJ_PER_IMG, 2).replace(",", ","))
+        e[2].metric("Nhiều nhất / ảnh", f"{MAX_OBJ_PER_IMG}")
+        e[3].metric("Mất cân bằng lớp", f"{fmt_dec(IMBALANCE, 2)}×", help="Tụ điện (2.292) so với transistor (63)")
+        st.caption("Gần như toàn bộ ảnh (≈420/460) có đúng 15 đối tượng; kích thước ảnh gốc từ ≈300 đến hơn 5000 px, "
+                   "tỉ lệ khung hình tập trung quanh 1,0–2,0.")
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown(f"**Phân bố đối tượng theo lớp (toàn bộ dữ liệu, {fmt_int(N_OBJECTS)})**")
+            st.bar_chart(pd.Series(DATASET_CLASS_COUNTS, name="Số đối tượng"))
+        with g2:
+            st.markdown(f"**Phân bố đối tượng theo lớp (tập test, {TEST_OBJECTS})**")
+            st.bar_chart(pd.Series(TEST_CLASS_COUNTS, name="Số đối tượng"))
 
     with t_cls:
         csv_path = next((r / "evaluation_metrics.csv" for r in ASSET_ROOTS if (r / "evaluation_metrics.csv").is_file()), None)
@@ -484,6 +537,8 @@ def page_perf() -> None:
             dm = pd.read_csv(csv_path)
             metrics = ["Precision", "Recall", "mAP50", "mAP50-95"]
             view = dm.copy()
+            view.insert(1, "Số mẫu (toàn bộ)", view["Class"].map(DATASET_CLASS_COUNTS))
+            view.insert(2, "Số mẫu (test)", view["Class"].map(TEST_CLASS_COUNTS))
             view["Class"] = view["Class"].map(lambda c: f"{CLASS_DESC.get(c, c)} ({c})")
             view[metrics] = view[metrics] * 100
             cfg = {m: st.column_config.ProgressColumn(m, min_value=0, max_value=100, format="%.1f%%") for m in metrics}
@@ -492,7 +547,8 @@ def page_perf() -> None:
             st.bar_chart(dm.set_index("Class")["mAP50"])
             weak = dm[dm["mAP50"] < 0.10]["Class"].tolist()
             if weak:
-                st.warning("Các lớp mAP50 dưới 10% (ít mẫu, cần thêm dữ liệu): " + ", ".join(CLASS_DESC.get(c, c) for c in weak))
+                st.warning("Các lớp mAP50 dưới 10% (đều là lớp hiếm, cần thêm dữ liệu): "
+                           + ", ".join(f"{CLASS_DESC.get(c, c)} ({DATASET_CLASS_COUNTS.get(c, '?')} mẫu)" for c in weak))
             avg = dm[metrics].mean()
             st.caption("Trung bình các lớp (macro): " + " · ".join(f"{m} {avg[m]:.1%}" for m in metrics))
 
@@ -506,17 +562,39 @@ def page_perf() -> None:
         if q:
             with st.expander("Biểu đồ gốc của Ultralytics"):
                 stretch(st.image, str(q))
-        st.info("Loss validation xấp xỉ loss train: mô hình chưa overfit mà có dấu hiệu underfit. mAP50 đạt đỉnh ≈ 0,27 quanh epoch 67–74.")
+        st.info("**Nhận xét:** huấn luyện dừng ở epoch 94 (patience 20), tốt nhất ở epoch 74. Box loss giảm từ ≈2,4 (train) xuống ≈1,6, "
+                "val box loss ≈1,74; cls loss train và val chập nhau ở ≈2,0, nên chưa có dấu hiệu overfit mà có xu hướng underfit. "
+                "mAP50 đạt đỉnh ≈0,27 quanh epoch 67–74, mAP50-95 đạt đỉnh ≈0,175 quanh epoch 74. "
+                "Precision đạt đỉnh ≈0,68 rất sớm (epoch 5) rồi giảm về ≈0,24, trong khi recall tăng dần lên ≈0,3–0,45.")
 
     with t_cm:
         p = find_asset("confusion_matrix.png")
         if p:
-            stretch(st.image, str(p), caption="Confusion matrix trên tập test")
+            stretch(st.image, str(p), caption="Confusion matrix trên tập test (số lượng, chưa chuẩn hoá)")
             st.info("**Cách đọc:** cột = nhãn thật, hàng = dự đoán. Ô chéo = dự đoán đúng. "
                     "Ô 'background' ở **cột cuối** là dự đoán sai trên nền (false positive); "
                     "ô 'background' ở **hàng cuối** là linh kiện bị bỏ sót (false negative).")
         else:
             st.info("Chưa có ảnh `confusion_matrix.png`.")
+
+        correct = sum(CM_DIAG.values())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Dự đoán đúng lớp", f"{correct}/{TEST_OBJECTS}", f"{correct / TEST_OBJECTS:.1%}", delta_color="off")
+        c2.metric("Bỏ sót (dự đoán là nền)", fmt_int(sum(CM_FN_BG.values())))
+        c3.metric("Dự đoán thừa trên nền", fmt_int(sum(CM_FP_BG.values())))
+        st.caption("Số dự đoán thừa trên nền rất lớn so với số đối tượng thật vì ma trận được tính ở ngưỡng tin cậy thấp; "
+                   "vì vậy các con số ở đây không khớp tuyệt đối với Precision/Recall trong bảng theo lớp.")
+
+        cm_rows = [{"Lớp": f"{CLASS_DESC[c]} ({c})", "Số thật (test)": TEST_CLASS_COUNTS[c], "Đúng": CM_DIAG[c],
+                    "Tỉ lệ đúng (%)": round(CM_DIAG[c] / TEST_CLASS_COUNTS[c] * 100, 1),
+                    "Bỏ sót": CM_FN_BG[c], "Dự đoán thừa trên nền": CM_FP_BG[c]} for c in CLASS_DESC]
+        cfg = {"Tỉ lệ đúng (%)": st.column_config.ProgressColumn("Tỉ lệ đúng", min_value=0, max_value=100, format="%.1f%%")}
+        stretch(st.dataframe, pd.DataFrame(cm_rows), hide_index=True, column_config=cfg)
+
+        st.markdown("**Các nhầm lẫn giữa các lớp nhiều nhất** (thật → dự đoán)")
+        conf_rows = [{"Nhãn thật": CLASS_DESC[a], "Bị dự đoán thành": CLASS_DESC[b], "Số lượng": n}
+                     for a, b, n in CM_TOP_CONFUSIONS]
+        stretch(st.dataframe, pd.DataFrame(conf_rows), hide_index=True)
 
 
 # ───────────────────────── GALLERY ─────────────────────────
