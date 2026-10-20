@@ -1,4 +1,4 @@
-# PCB-defect-detection
+# PCB-detection
 
 ## Chạy ứng dụng nhận diện trên máy local
 
